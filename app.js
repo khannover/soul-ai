@@ -28,18 +28,26 @@
 const AppState = {
   mode: 'idle',           // 'idle' | 'dance' | 'music' | 'chat'
   characterImage: null,   // HTMLImageElement
+  characterImageDataURL: null, // base64 data URL (PNG) for export/import & sharing
   audioContext: null,
   analyser: null,
   playerSource: null,     // MediaElementAudioSourceNode
   micSource: null,        // MediaStreamAudioSourceNode
   micStream: null,
   audioElement: new Audio(),
+  lastAudioSource: null,   // 'file' | 'url'
   isPlaying: false,
   isMicListening: false,
   isVoiceListening: false,
-  beatEnergy: 0,          // 0–1 current audio energy
+  isSpeaking: false,      // TTS is currently playing (for mouth animation)
+  micEnergy: 0,           // 0–1 current environmental mic level (for UI meter)
+  micConfirmCount: 0,     // frames above threshold (for debounced music detection)
+  beatEnergy: 0,          // 0–1 current audio energy (sustained)
   peakEnergy: 0,          // running peak for normalization
-  beatThreshold: 0.15,    // auto-adjusts with sensitivity setting
+  beatThreshold: CONFIG.beat.defaultThreshold,
+  prevFreqData: null,     // previous frame freq data for spectral flux
+  onset: 0,               // 0–1 percussive onset strength (spectral flux)
+  onsetPeak: 0,           // for normalizing onset over time
   envMusicDetected: false,
   animFrame: null,
   particles: [],
@@ -80,6 +88,129 @@ const AppState = {
     // Shake
     shakeX: 0,
     shakeY: 0,
+    // TTS speaking animation
+    speakingPhase: 0,
+  },
+};
+
+/* ─────────────────────────────────────────────────
+   CONFIG — All tunable constants in one place
+   Makes animation, particles, audio, and thresholds easy to tweak.
+   ───────────────────────────────────────────────── */
+const CONFIG = {
+  // Audio analysis
+  audio: {
+    fftSize: 256,
+    playerSmoothing: 0.8,
+    micSmoothing: 0.7,
+    energyFocusRatio: 0.5,
+    peakDecay: 0.995,
+    minPeak: 0.01,
+  },
+
+  // Particle system
+  particles: {
+    initialCount: 60,
+    maxCount: 150,
+    baseSpeed: 0.3,
+    lifeDecay: 0.003,
+    connectionDistance: 80,
+    burstMultiplier: 5,
+    burstEnergyThreshold: 0.7,
+    burstSpread: 200,
+    burstVelocity: 2,
+    burstRadius: [1, 3],
+  },
+
+  // Character canvas & rendering
+  character: {
+    maxCanvasSize: 420,
+    sizeLandscape: 0.85,
+    sizePortrait: 0.75,
+    shadowBase: 20,
+    shadowEnergy: 40,
+    flashThreshold: 0.01,
+    flashAlphaMul: 0.3,
+  },
+
+  // Animation lerps and motion parameters
+  animation: {
+    lerp: {
+      scale: 0.12,
+      rotation: 0.1,
+      position: 0.1,
+      flash: 0.88,
+    },
+    idle: {
+      breathSpeed: 0.8,
+      breathAmount: 0.02,
+      floatAmount: 3,
+      blinkMin: 3.5,
+      blinkRandom: 2,
+    },
+    dance: {
+      bounceSpeed: 3,
+      swaySpeed: 1.5,
+      scaleAmount: 0.08,
+      yAmount: 18,
+      xAmount: 10,
+      rotAmount: 3,
+    },
+    music: {
+      bounceBase: 2,
+      bounceEnergy: 4,
+      swayBase: 1,
+      swayEnergy: 2,
+      beatScale: 0.15,
+      beatY: 20,
+      idleScale: 0.04,
+      idleY: 8,
+      xBase: 5,
+      xEnergy: 10,
+      rotBase: 2,
+      rotEnergy: 4,
+      shakeThreshold: 0.75,
+      shakeAmount: 8,
+    },
+  },
+
+  // Beat detection & visualizer
+  beat: {
+    defaultThreshold: 0.15,
+    sensitivityHigh: 0.3,
+    sensitivityLow: 0.05,
+    envMicFactor: 0.5,
+    envMicCap: 0.3,
+    visualizerMaxH: 55,
+    visualizerHueShift: 50,
+
+    // Onset detection (spectral flux) — makes dancing feel much tighter on beats
+    onsetDecay: 0.92,
+    onsetNormDiv: 80,         // divisor for raw flux → 0-1 normalization
+    onsetTrigger: 0.55,       // when onset exceeds this, treat as strong beat
+  },
+
+  // Glow rings around character
+  glow: {
+    outerBase: 0.45,
+    innerBase: 0.65,
+    outerEnergy: 0.15,
+    innerEnergy: 0.1,
+    sizeBase: 12,
+    sizeEnergy: 30,
+    alphaBase: 0.2,
+    alphaEnergy: 0.5,
+  },
+
+  // UI, chat, AI, timing
+  ui: {
+    chatHistoryLimit: 30,
+    aiPromptTurns: 10,
+    aiMaxTokens: 120,
+    toastDuration: 3000,
+    voiceFeedbackDuration: 2500,
+    resizeDebounce: 200,
+    animationDeltaCap: 0.1,
   },
 };
 
@@ -114,8 +245,8 @@ function applySettings() {
   UI.volumeSlider.value = s.volume;
   UI.settingVolume.value = s.volume;
   UI.volDisplay.textContent = Math.round(s.volume * 100) + '%';
-  // Sensitivity — map 0–1 → beat threshold 0.3–0.05
-  AppState.beatThreshold = 0.3 - s.sensitivity * 0.25;
+  // Sensitivity — map 0–1 → beat threshold (high sens = lower threshold)
+  AppState.beatThreshold = CONFIG.beat.sensitivityHigh - s.sensitivity * (CONFIG.beat.sensitivityHigh - CONFIG.beat.sensitivityLow);
   UI.settingSensitivity.value = s.sensitivity;
   UI.sensDisplay.textContent = Math.round(s.sensitivity * 100) + '%';
   // Speed
@@ -135,6 +266,150 @@ function applySettings() {
 }
 
 /* ─────────────────────────────────────────────────
+   CHAT HISTORY PERSISTENCE
+   ───────────────────────────────────────────────── */
+
+function loadChatHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('souler-chat-history') || '[]');
+    AppState.chatHistory = Array.isArray(saved) ? saved.slice(-CONFIG.ui.chatHistoryLimit) : [];
+  } catch (e) {
+    console.warn('Chat history load error:', e);
+    AppState.chatHistory = [];
+  }
+  renderChatHistory();
+}
+
+function saveChatHistory() {
+  try {
+    localStorage.setItem('souler-chat-history', JSON.stringify(AppState.chatHistory.slice(-CONFIG.ui.chatHistoryLimit)));
+  } catch (e) {
+    console.warn('Chat history save error:', e);
+  }
+}
+
+function renderChatHistory() {
+  const container = UI.chatMessages;
+  if (!container) return;
+  container.innerHTML = '';
+
+  if (AppState.chatHistory.length === 0) {
+    const ph = document.createElement('div');
+    ph.className = 'text-gray-500 text-xs text-center mt-8';
+    ph.textContent = 'Say "chat" or tap the ⚡ button to start talking to Souler.';
+    container.appendChild(ph);
+    return;
+  }
+
+  AppState.chatHistory.forEach(msg => {
+    const role = msg.role === 'assistant' ? 'ai' : 'user';
+    const el = document.createElement('div');
+    el.className = 'chat-msg ' + role;
+    el.innerHTML = `
+      <div class="avatar">${role === 'user' ? '👤' : '🤖'}</div>
+      <div class="bubble">${escapeHtml(msg.content)}</div>
+    `;
+    container.appendChild(el);
+  });
+  container.scrollTop = container.scrollHeight;
+}
+
+function clearChatHistory() {
+  AppState.chatHistory = [];
+  localStorage.removeItem('souler-chat-history');
+  renderChatHistory();
+  showToast('Chat history cleared', 'info');
+}
+
+/* ─────────────────────────────────────────────────
+   CHARACTER + SETTINGS EXPORT / IMPORT
+   ───────────────────────────────────────────────── */
+
+function exportCharacterAndSettings() {
+  const s = AppState.settings;
+
+  // Never export the raw API key
+  const safeSettings = {
+    apiBase: s.apiBase,
+    model: s.model,
+    volume: s.volume,
+    sensitivity: s.sensitivity,
+    theme: s.theme,
+    animSpeed: s.animSpeed,
+    systemPrompt: s.systemPrompt,
+  };
+
+  const payload = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    settings: safeSettings,
+    character: AppState.characterImageDataURL
+      ? {
+          image: AppState.characterImageDataURL,
+          note: 'PNG data URL (first frame if original was animated)'
+        }
+      : null,
+  };
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  const date = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `souler-preset-${date}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  showToast('Preset exported (settings + character)', 'success');
+}
+
+function importCharacterAndSettings(file) {
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+
+      if (!data || data.version !== 1) {
+        throw new Error('Unsupported preset version');
+      }
+
+      // Apply safe settings
+      const incoming = data.settings || {};
+      const s = AppState.settings;
+
+      if (incoming.apiBase) s.apiBase = incoming.apiBase;
+      if (incoming.model) s.model = incoming.model;
+      if (typeof incoming.volume === 'number') s.volume = Math.max(0, Math.min(1, incoming.volume));
+      if (typeof incoming.sensitivity === 'number') s.sensitivity = Math.max(0, Math.min(1, incoming.sensitivity));
+      if (incoming.theme) s.theme = incoming.theme;
+      if (typeof incoming.animSpeed === 'number') s.animSpeed = Math.max(0.3, Math.min(2, incoming.animSpeed)); // keep user-facing range simple
+      if (incoming.systemPrompt) s.systemPrompt = incoming.systemPrompt;
+
+      applySettings();
+
+      // Load character if present
+      if (data.character && data.character.image) {
+        loadCharacterImage(data.character.image); // will also set characterImageDataURL
+      }
+
+      saveSettings(); // persist the imported settings
+      showToast('Preset imported successfully!', 'success');
+
+    } catch (err) {
+      console.error(err);
+      showToast('Failed to import preset: ' + err.message, 'error');
+    }
+  };
+  reader.onerror = () => showToast('Could not read preset file', 'error');
+  reader.readAsText(file);
+}
+
+/* ─────────────────────────────────────────────────
    3. PARTICLE BACKGROUND
    ───────────────────────────────────────────────── */
 
@@ -146,7 +421,7 @@ function resizeParticleCanvas() {
   pCanvas.height = window.innerHeight;
 }
 
-function initParticles(count = 60) {
+function initParticles(count = CONFIG.particles.initialCount) {
   AppState.particles = [];
   for (let i = 0; i < count; i++) {
     AppState.particles.push(createParticle());
@@ -158,8 +433,8 @@ function createParticle() {
     x: Math.random() * pCanvas.width,
     y: Math.random() * pCanvas.height,
     r: Math.random() * 1.5 + 0.3,
-    vx: (Math.random() - 0.5) * 0.3,
-    vy: (Math.random() - 0.5) * 0.3 - 0.1,
+    vx: (Math.random() - 0.5) * CONFIG.particles.baseSpeed,
+    vy: (Math.random() - 0.5) * CONFIG.particles.baseSpeed - 0.1,
     alpha: Math.random() * 0.6 + 0.1,
     life: Math.random(),
     hue: 185 + Math.random() * 40, // cyan-ish range
@@ -167,7 +442,7 @@ function createParticle() {
 }
 
 function updateParticles(energy) {
-  const speedMult = 1 + energy * 3;
+  const speedMult = 1 + energy * 3; // could expose energy multiplier later
   const accentColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
 
   pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
@@ -175,7 +450,7 @@ function updateParticles(energy) {
   AppState.particles.forEach((p, i) => {
     p.x  += p.vx * speedMult;
     p.y  += p.vy * speedMult;
-    p.life -= 0.003 * speedMult;
+    p.life -= CONFIG.particles.lifeDecay * speedMult;
 
     if (p.life <= 0 || p.x < 0 || p.x > pCanvas.width || p.y < 0 || p.y > pCanvas.height) {
       AppState.particles[i] = createParticle();
@@ -193,31 +468,31 @@ function updateParticles(energy) {
       const dx = p.x - q.x;
       const dy = p.y - q.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 80) {
+      if (dist < CONFIG.particles.connectionDistance) {
         pCtx.beginPath();
         pCtx.moveTo(p.x, p.y);
         pCtx.lineTo(q.x, q.y);
-        pCtx.strokeStyle = `hsla(${p.hue}, 100%, 70%, ${0.05 * (1 - dist / 80) * p.life})`;
+        pCtx.strokeStyle = `hsla(${p.hue}, 100%, 70%, ${0.05 * (1 - dist / CONFIG.particles.connectionDistance) * p.life})`;
         pCtx.lineWidth = 0.5;
         pCtx.stroke();
       }
     }
   });
 
-  // Beat burst: spawn extra particles on loud beat
-  if (energy > 0.7) {
-    const burst = Math.floor(energy * 5);
+  // Beat burst: spawn extra particles on loud energy OR strong percussive onset
+  if (energy > CONFIG.particles.burstEnergyThreshold || AppState.onset > 0.6) {
+    const burst = Math.floor(energy * CONFIG.particles.burstMultiplier);
     for (let b = 0; b < burst; b++) {
       const bp = createParticle();
-      bp.x  = pCanvas.width / 2 + (Math.random() - 0.5) * 200;
-      bp.y  = pCanvas.height * 0.5 + (Math.random() - 0.5) * 200;
-      bp.vx = (Math.random() - 0.5) * 2;
-      bp.vy = (Math.random() - 0.5) * 2 - 0.5;
-      bp.r  = Math.random() * 3 + 1;
+      bp.x  = pCanvas.width / 2 + (Math.random() - 0.5) * CONFIG.particles.burstSpread;
+      bp.y  = pCanvas.height * 0.5 + (Math.random() - 0.5) * CONFIG.particles.burstSpread;
+      bp.vx = (Math.random() - 0.5) * CONFIG.particles.burstVelocity;
+      bp.vy = (Math.random() - 0.5) * CONFIG.particles.burstVelocity - 0.5;
+      bp.r  = Math.random() * (CONFIG.particles.burstRadius[1] - CONFIG.particles.burstRadius[0]) + CONFIG.particles.burstRadius[0];
       bp.alpha = 0.9;
       AppState.particles.push(bp);
-      if (AppState.particles.length > 150) {
-        AppState.particles.splice(0, AppState.particles.length - 150);
+      if (AppState.particles.length > CONFIG.particles.maxCount) {
+        AppState.particles.splice(0, AppState.particles.length - CONFIG.particles.maxCount);
       }
     }
   }
@@ -231,7 +506,7 @@ const charCanvas = document.getElementById('character-canvas');
 const charCtx    = charCanvas.getContext('2d');
 
 function resizeCharCanvas() {
-  const size = Math.min(window.innerWidth * 0.85, window.innerHeight * 0.55, 420);
+  const size = Math.min(window.innerWidth * 0.85, window.innerHeight * 0.55, CONFIG.character.maxCanvasSize);
   charCanvas.width  = size;
   charCanvas.height = size;
   charCanvas.style.width  = size + 'px';
@@ -252,11 +527,11 @@ function drawCharacter() {
 
   // Smoothly lerp animation values
   const spd = AppState.settings.animSpeed;
-  a.scale    += (a.targetScale    - a.scale)    * 0.12 * spd;
-  a.rotation += (a.targetRotation - a.rotation) * 0.1  * spd;
-  a.x        += (a.targetX        - a.x)        * 0.1  * spd;
-  a.y        += (a.targetY        - a.y)        * 0.1  * spd;
-  a.flashAlpha *= 0.88;
+  a.scale    += (a.targetScale    - a.scale)    * CONFIG.animation.lerp.scale * spd;
+  a.rotation += (a.targetRotation - a.rotation) * CONFIG.animation.lerp.rotation * spd;
+  a.x        += (a.targetX        - a.x)        * CONFIG.animation.lerp.position * spd;
+  a.y        += (a.targetY        - a.y)        * CONFIG.animation.lerp.position * spd;
+  a.flashAlpha *= CONFIG.animation.lerp.flash;
 
   ctx.save();
   ctx.translate(w / 2 + a.x + a.shakeX, h / 2 + a.y + a.shakeY);
@@ -267,18 +542,18 @@ function drawCharacter() {
     // Draw the uploaded character
     const img = AppState.characterImage;
     const imgAspect = img.naturalWidth / img.naturalHeight;
-    const drawW = (imgAspect >= 1) ? w * 0.85 : w * 0.75;
+    const drawW = (imgAspect >= 1) ? w * CONFIG.character.sizeLandscape : w * CONFIG.character.sizePortrait;
     const drawH = drawW / imgAspect;
 
     // Shadow / glow
     ctx.shadowColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
-    ctx.shadowBlur  = 20 + energy * 40;
+    ctx.shadowBlur  = CONFIG.character.shadowBase + energy * CONFIG.character.shadowEnergy;
 
     ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
 
     // Beat flash overlay
-    if (a.flashAlpha > 0.01) {
-      ctx.globalAlpha = a.flashAlpha * 0.3;
+    if (a.flashAlpha > CONFIG.character.flashThreshold) {
+      ctx.globalAlpha = a.flashAlpha * CONFIG.character.flashAlphaMul;
       ctx.fillStyle   = a.flashColor;
       ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
       ctx.globalAlpha = 1;
@@ -339,6 +614,25 @@ function drawPlaceholderCharacter(ctx, w, h, energy) {
   ctx.shadowBlur = 8;
   ctx.fill();
   ctx.restore();
+
+  // Mouth — animated when Souler is speaking via TTS
+  const mouthY = cy - sz * 0.205;
+  if (AppState.isSpeaking) {
+    const open = (Math.sin(AppState.anim.speakingPhase * 1.75) * 0.5 + 0.5) * 0.065 + 0.012;
+    ctx.beginPath();
+    ctx.ellipse(cx, mouthY, sz * 0.052, sz * open, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#111';
+    ctx.fill();
+  } else {
+    // Closed mouth as a small line
+    ctx.strokeStyle = glow;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - sz * 0.032, mouthY);
+    ctx.lineTo(cx + sz * 0.032, mouthY);
+    ctx.stroke();
+    ctx.lineWidth = 2;
+  }
 
   ctx.fillStyle = 'rgba(0,245,255,0.1)';
 
@@ -407,11 +701,32 @@ function loadCharacterImage(src) {
   img.crossOrigin = 'anonymous';
   img.onload = () => {
     AppState.characterImage = img;
+
+    // Capture a portable PNG data URL for export/import
+    try {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const cx = c.getContext('2d');
+      cx.drawImage(img, 0, 0);
+      AppState.characterImageDataURL = c.toDataURL('image/png');
+    } catch (e) {
+      AppState.characterImageDataURL = null;
+    }
+
     document.getElementById('upload-overlay').style.display = 'none';
-    showToast('Character loaded!', 'success');
+
+    // Context-aware success message
+    if (AppState._pendingGifUpload) {
+      showToast('GIF loaded — first frame only (no animation)', 'info');
+      AppState._pendingGifUpload = false;
+    } else {
+      showToast('Character loaded!', 'success');
+    }
     triggerFlash();
   };
   img.onerror = () => {
+    AppState._pendingGifUpload = false;
     showToast('Failed to load image', 'error');
   };
   img.src = src;
@@ -425,19 +740,31 @@ function initAudioContext() {
   if (AppState.audioContext) return;
   AppState.audioContext = new (window.AudioContext || window.webkitAudioContext)();
   AppState.analyser = AppState.audioContext.createAnalyser();
-  AppState.analyser.fftSize = 256;
-  AppState.analyser.smoothingTimeConstant = 0.8;
+  AppState.analyser.fftSize = CONFIG.audio.fftSize;
+  AppState.analyser.smoothingTimeConstant = CONFIG.audio.playerSmoothing;
   AppState.analyser.connect(AppState.audioContext.destination);
 }
 
 /**
  * Connect the <audio> element to the analyser graph.
+ * Gracefully handles CORS-blocked cross-origin audio (common with public URLs).
  */
 function connectPlayerToAnalyser() {
   initAudioContext();
   if (!AppState.playerSource) {
-    AppState.playerSource = AppState.audioContext.createMediaElementSource(AppState.audioElement);
-    AppState.playerSource.connect(AppState.analyser);
+    try {
+      AppState.playerSource = AppState.audioContext.createMediaElementSource(AppState.audioElement);
+      AppState.playerSource.connect(AppState.analyser);
+    } catch (err) {
+      // This is almost always a CORS / tainted media element error
+      console.warn('Web Audio connection failed (likely CORS):', err);
+      if (AppState.lastAudioSource === 'url') {
+        showToast('Beat detection disabled — URL blocked by CORS. Local files work perfectly.', 'info');
+      } else {
+        showToast('Audio analysis unavailable for this source.', 'info');
+      }
+      // Playback still works, just no reactive visuals / beat sync
+    }
   }
 }
 
@@ -452,19 +779,41 @@ function computeAudioEnergy() {
   const data   = new Uint8Array(bufLen);
   AppState.analyser.getByteFrequencyData(data);
 
-  // Focus on bass/mid frequencies for beat detection (first ~half)
+  // Focus on bass/mid frequencies
+  const focusBins = Math.floor(bufLen * CONFIG.audio.energyFocusRatio);
+
+  // --- 1. Sustained energy (existing behavior) ---
   let sum = 0;
-  const focusBins = Math.floor(bufLen * 0.5);
   for (let i = 0; i < focusBins; i++) {
     sum += data[i];
   }
   const avg = sum / (focusBins * 255);
 
-  // Update running peak for auto-normalization
-  AppState.peakEnergy = Math.max(AppState.peakEnergy * 0.995, avg);
-  const normalized = AppState.peakEnergy > 0.01 ? Math.min(avg / AppState.peakEnergy, 1) : avg;
-
+  AppState.peakEnergy = Math.max(AppState.peakEnergy * CONFIG.audio.peakDecay, avg);
+  const normalized = AppState.peakEnergy > CONFIG.audio.minPeak ? Math.min(avg / AppState.peakEnergy, 1) : avg;
   AppState.beatEnergy = normalized;
+
+  // --- 2. Spectral flux onset detection (new — much tighter on real beats) ---
+  let flux = 0;
+  if (AppState.prevFreqData && AppState.prevFreqData.length === bufLen) {
+    for (let i = 0; i < focusBins; i++) {
+      const diff = data[i] - AppState.prevFreqData[i];
+      if (diff > 0) flux += diff;
+    }
+  }
+
+  // Normalize flux into ~0–1 range
+  const normFlux = Math.min(flux / (focusBins * CONFIG.beat.onsetNormDiv), 1);
+
+  // Peak-normalized + smoothed onset
+  AppState.onsetPeak = Math.max(AppState.onsetPeak * CONFIG.beat.onsetDecay, normFlux);
+  AppState.onset = (AppState.onsetPeak > 0.005)
+    ? Math.min(normFlux / AppState.onsetPeak, 1)
+    : 0;
+
+  // Keep copy for next frame (getByteFrequencyData reuses the buffer)
+  AppState.prevFreqData = new Uint8Array(data);
+
   return normalized;
 }
 
@@ -480,14 +829,14 @@ function updateVisualizer() {
 
   const barCount = bars.length;
   const step = Math.floor(data.length / barCount);
-  const maxH = 55;
+  const maxH = CONFIG.beat.visualizerMaxH;
 
   bars.forEach((bar, i) => {
     const val = data[i * step] / 255;
     const h   = Math.max(2, val * maxH);
     bar.style.height = h + 'px';
     // Color shifts from accent → pink at high energy
-    const hue = 185 - val * 50;
+    const hue = 185 - val * CONFIG.beat.visualizerHueShift;
     bar.style.background = `hsl(${hue}, 100%, 60%)`;
     bar.style.boxShadow  = `0 0 ${4 + val * 8}px hsl(${hue}, 100%, 60%)`;
   });
@@ -514,17 +863,47 @@ function setupAudioPlayer() {
   audio.addEventListener('pause', () => {
     AppState.isPlaying = false;
     updatePlayPauseIcon();
+    resetAudioAnalysis();
     if (!AppState.isMicListening) setMode('idle');
   });
 
   audio.addEventListener('ended', () => {
     AppState.isPlaying = false;
     updatePlayPauseIcon();
+    resetAudioAnalysis();
     if (!AppState.isMicListening) setMode('idle');
   });
 
   audio.addEventListener('error', () => {
-    showToast('Audio error: cannot play this source', 'error');
+    const err = audio.error;
+    let msg = 'Audio error: cannot play this source';
+    let type = 'error';
+
+    if (err) {
+      switch (err.code) {
+        case 1: // MEDIA_ERR_ABORTED
+          msg = 'Playback was aborted.';
+          type = 'info';
+          break;
+        case 2: // MEDIA_ERR_NETWORK
+          msg = 'Network error while loading audio.';
+          break;
+        case 3: // MEDIA_ERR_DECODE
+          msg = 'Audio file is corrupted or unsupported format.';
+          break;
+        case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+          if (AppState.lastAudioSource === 'url') {
+            msg = 'Audio URL failed (CORS, 404, or unsupported). Try a direct MP3 link or load a local file.';
+          } else {
+            msg = 'Audio format not supported by this browser.';
+          }
+          break;
+        default:
+          msg = 'Audio error: ' + (err.message || 'cannot play this source');
+      }
+    }
+
+    showToast(msg, type);
     AppState.isPlaying = false;
     updatePlayPauseIcon();
   });
@@ -545,12 +924,21 @@ function pauseAudio() {
 function stopAudio() {
   AppState.audioElement.pause();
   AppState.audioElement.currentTime = 0;
+  resetAudioAnalysis();
+}
+
+function resetAudioAnalysis() {
+  AppState.prevFreqData = null;
+  AppState.onset = 0;
+  AppState.onsetPeak = 0;
+  AppState.beatEnergy = 0;
 }
 
 function loadAudioFile(file) {
   const url = URL.createObjectURL(file);
   AppState.audioElement.src = url;
   AppState.audioElement.load();
+  AppState.lastAudioSource = 'file';
   UI.trackInfo.textContent = file.name;
   showToast('Track loaded: ' + file.name, 'info');
 }
@@ -559,6 +947,7 @@ function loadAudioURL(url) {
   if (!url) return;
   AppState.audioElement.src = url;
   AppState.audioElement.load();
+  AppState.lastAudioSource = 'url';
   const shortName = url.split('/').pop().split('?')[0] || 'URL track';
   UI.trackInfo.textContent = shortName;
   showToast('Loading URL track…', 'info');
@@ -590,14 +979,15 @@ async function startEnvMic() {
 
     // Create a separate analyser for mic to avoid mixing with player
     const micAnalyser = AppState.audioContext.createAnalyser();
-    micAnalyser.fftSize = 256;
-    micAnalyser.smoothingTimeConstant = 0.7;
+    micAnalyser.fftSize = CONFIG.audio.fftSize;
+    micAnalyser.smoothingTimeConstant = CONFIG.audio.micSmoothing;
     AppState.micSource.connect(micAnalyser);
 
     // Store mic analyser; we'll use it in the animation loop
     AppState.micAnalyser = micAnalyser;
 
     AppState.isMicListening = true;
+    AppState.micConfirmCount = 0;
     UI.btnMic.classList.add('active');
     UI.micLabel.textContent = 'MIC ON';
     showToast('Environmental mic active', 'info');
@@ -624,8 +1014,11 @@ function stopEnvMic() {
   AppState.micAnalyser = null;
   AppState.isMicListening = false;
   AppState.envMusicDetected = false;
+  AppState.micEnergy = 0;
+  AppState.micConfirmCount = 0;
   UI.btnMic.classList.remove('active');
   UI.micLabel.textContent = 'MIC';
+  if (UI.micLevelMeter) UI.micLevelMeter.classList.add('hidden');
   if (!AppState.isPlaying) setMode('idle');
   showToast('Microphone off', 'info');
 }
@@ -635,29 +1028,73 @@ function stopEnvMic() {
  */
 function checkEnvMic() {
   if (!AppState.micAnalyser) return;
+
   const data = new Uint8Array(AppState.micAnalyser.frequencyBinCount);
   AppState.micAnalyser.getByteFrequencyData(data);
 
+  // Overall energy for the UI meter
   let sum = 0;
   for (let i = 0; i < data.length; i++) sum += data[i];
   const avg = sum / (data.length * 255);
+  AppState.micEnergy = avg;
 
-  // Simple threshold: if ambient energy > sensitivity threshold → music mode
-  if (avg > AppState.beatThreshold * 0.5) {
+  // Update the live level meter in the UI
+  updateMicLevelMeter(avg);
+
+  // Smarter music detection:
+  // - Slightly bass-weighted (first 35% of spectrum)
+  // - Requires sustained activity (hysteresis) to avoid speech/false triggers
+  const focusBins = Math.floor(data.length * 0.35);
+  let bassSum = 0;
+  for (let i = 0; i < focusBins; i++) bassSum += data[i];
+  const bassAvg = bassSum / (focusBins * 255);
+
+  const threshold = AppState.beatThreshold * CONFIG.beat.envMicFactor;
+
+  const isAbove = bassAvg > threshold * 0.85; // a bit more forgiving on bass
+
+  if (isAbove) {
+    AppState.micConfirmCount = Math.min(AppState.micConfirmCount + 1, 30);
+  } else {
+    AppState.micConfirmCount = Math.max(AppState.micConfirmCount - 2, 0); // decay faster when quiet
+  }
+
+  const confirmedMusic = AppState.micConfirmCount > 12; // ~200ms sustained
+
+  if (confirmedMusic) {
     if (!AppState.envMusicDetected) {
       AppState.envMusicDetected = true;
       setMode('music');
       showToast('Music detected!', 'info');
     }
-    // Use mic energy for animation when not playing a track
     if (!AppState.isPlaying) {
-      AppState.beatEnergy = Math.min(avg / 0.3, 1);
+      // Feed the character animation from the mic
+      AppState.beatEnergy = Math.min(bassAvg / CONFIG.beat.envMicCap, 1);
     }
   } else {
     if (AppState.envMusicDetected) {
       AppState.envMusicDetected = false;
       if (!AppState.isPlaying) setMode('idle');
     }
+  }
+}
+
+function updateMicLevelMeter(energy) {
+  const meter = UI.micLevelMeter;
+  if (!meter) return;
+
+  // Show meter only when mic is actively listening
+  if (AppState.isMicListening) {
+    meter.classList.remove('hidden');
+    // Map 0–0.6+ energy to 0–100% fill
+    const fill = Math.min(energy / 0.55, 1) * 100;
+    meter.style.setProperty('--fill', fill + '%');
+    // Dynamic color: cyan → pink as it gets louder (more "musical")
+    const hue = 185 - Math.min(energy * 70, 55);
+    meter.style.background = `hsl(${hue}, 100%, 55%)`;
+    meter.style.boxShadow = `0 0 5px hsl(${hue}, 100%, 55%)`;
+  } else {
+    meter.classList.add('hidden');
   }
 }
 
@@ -804,6 +1241,7 @@ async function sendChatMessage(text) {
   // Push user message to history and UI
   AppState.chatHistory.push({ role: 'user', content: text });
   addChatBubble('user', text);
+  saveChatHistory();
 
   // Show typing indicator
   const typingId = addTypingIndicator();
@@ -811,7 +1249,7 @@ async function sendChatMessage(text) {
 
   const messages = [
     { role: 'system', content: AppState.settings.systemPrompt },
-    ...AppState.chatHistory.slice(-10), // keep last 10 turns
+    ...AppState.chatHistory.slice(-CONFIG.ui.aiPromptTurns), // keep last N turns for context
   ];
 
   try {
@@ -824,7 +1262,7 @@ async function sendChatMessage(text) {
       body: JSON.stringify({
         model: AppState.settings.model || 'gpt-4o-mini',
         messages,
-        max_tokens: 120,
+        max_tokens: CONFIG.ui.aiMaxTokens,
         temperature: 0.8,
       }),
     });
@@ -843,6 +1281,7 @@ async function sendChatMessage(text) {
     addChatBubble('ai', reply);
     showChatBubbleOnCharacter(reply);
     speak(reply);
+    saveChatHistory();
   } catch (err) {
     removeTypingIndicator(typingId);
     const errMsg = 'AI error: ' + err.message;
@@ -936,6 +1375,7 @@ const UI = {
 
   btnMic:            document.getElementById('btn-mic'),
   micLabel:          document.getElementById('mic-label'),
+  micLevelMeter:     document.getElementById('mic-level-meter'),
   btnVoice:          document.getElementById('btn-voice'),
   btnModeToggle:     document.getElementById('btn-mode-toggle'),
   modeToggleLabel:   document.getElementById('mode-toggle-label'),
@@ -947,9 +1387,13 @@ const UI = {
 
   fileInput:         document.getElementById('file-input'),
   btnReupload:       document.getElementById('btn-reupload'),
+  btnExportPreset:   document.getElementById('btn-export-preset'),
+  btnImportPreset:   document.getElementById('btn-import-preset'),
+  presetFileInput:   document.getElementById('preset-file-input'),
 
   chatPanel:         document.getElementById('chat-panel'),
   btnCloseChat:      document.getElementById('btn-close-chat'),
+  btnClearChat:      document.getElementById('btn-clear-chat'),
   chatMessages:      document.getElementById('chat-messages'),
   chatInput:         document.getElementById('chat-input'),
   btnSendChat:       document.getElementById('btn-send-chat'),
@@ -1031,8 +1475,12 @@ function wireEvents() {
 
   // ── Character Upload ──
   UI.fileInput.addEventListener('change', (e) => {
-    if (e.target.files[0]) {
-      loadCharacterImage(URL.createObjectURL(e.target.files[0]));
+    const file = e.target.files[0];
+    if (file) {
+      const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
+      // Store temporary flag so loadCharacterImage can show the right message
+      AppState._pendingGifUpload = isGif;
+      loadCharacterImage(URL.createObjectURL(file));
     }
     e.target.value = '';
   });
@@ -1040,6 +1488,21 @@ function wireEvents() {
     closeSettings();
     UI.fileInput.click();
   });
+
+  // Export / Import preset
+  UI.btnExportPreset?.addEventListener('click', () => {
+    exportCharacterAndSettings();
+  });
+  UI.btnImportPreset?.addEventListener('click', () => {
+    UI.presetFileInput?.click();
+  });
+  UI.presetFileInput?.addEventListener('change', (e) => {
+    if (e.target.files[0]) {
+      importCharacterAndSettings(e.target.files[0]);
+    }
+    e.target.value = '';
+  });
+
   charCanvas.addEventListener('click', () => {
     if (!AppState.characterImage) UI.fileInput.click();
     else triggerFlash();
@@ -1066,6 +1529,7 @@ function wireEvents() {
   // ── Chat ──
   UI.btnChat.addEventListener('click', openChatPanel);
   UI.btnCloseChat.addEventListener('click', closeChatPanel);
+  UI.btnClearChat?.addEventListener('click', clearChatHistory);
   UI.btnSendChat.addEventListener('click', () => {
     const text = UI.chatInput.value.trim();
     if (text) {
@@ -1155,7 +1619,7 @@ let lastFrame = 0;
 function animationLoop(timestamp) {
   AppState.animFrame = requestAnimationFrame(animationLoop);
 
-  const delta = Math.min((timestamp - lastFrame) / 1000, 0.1); // seconds, capped
+  const delta = Math.min((timestamp - lastFrame) / 1000, CONFIG.ui.animationDeltaCap); // seconds, capped
   lastFrame = timestamp;
 
   // 1) Compute audio energy
@@ -1203,16 +1667,16 @@ function updateCharacterAnimation(energy, delta) {
   switch (AppState.mode) {
     case 'idle': {
       // Gentle breathing: scale oscillation
-      a.breathPhase += delta * 0.8 * spd;
-      const breathScale = 1 + Math.sin(a.breathPhase) * 0.02;
+      a.breathPhase += delta * CONFIG.animation.idle.breathSpeed * spd;
+      const breathScale = 1 + Math.sin(a.breathPhase) * CONFIG.animation.idle.breathAmount;
       a.targetScale = breathScale;
       a.targetRotation = 0;
       a.targetX = 0;
-      a.targetY = Math.sin(a.breathPhase * 0.5) * 3;
+      a.targetY = Math.sin(a.breathPhase * 0.5) * CONFIG.animation.idle.floatAmount;
 
       // Blinking
       a.blinkTimer += delta;
-      if (a.blinkTimer > 3.5 + Math.random() * 2) {
+      if (a.blinkTimer > CONFIG.animation.idle.blinkMin + Math.random() * CONFIG.animation.idle.blinkRandom) {
         a.blinkTimer = 0;
         triggerBlink();
       }
@@ -1221,36 +1685,44 @@ function updateCharacterAnimation(energy, delta) {
 
     case 'dance': {
       // Energetic bouncing
-      a.bouncePhase += delta * 3 * spd;
-      a.swayPhase   += delta * 1.5 * spd;
-      a.targetScale = 1 + Math.abs(Math.sin(a.bouncePhase)) * 0.08;
-      a.targetY     = -Math.abs(Math.sin(a.bouncePhase)) * 18;
-      a.targetX     = Math.sin(a.swayPhase) * 10;
-      a.targetRotation = Math.sin(a.swayPhase * 0.7) * 3;
+      a.bouncePhase += delta * CONFIG.animation.dance.bounceSpeed * spd;
+      a.swayPhase   += delta * CONFIG.animation.dance.swaySpeed * spd;
+      a.targetScale = 1 + Math.abs(Math.sin(a.bouncePhase)) * CONFIG.animation.dance.scaleAmount;
+      a.targetY     = -Math.abs(Math.sin(a.bouncePhase)) * CONFIG.animation.dance.yAmount;
+      a.targetX     = Math.sin(a.swayPhase) * CONFIG.animation.dance.xAmount;
+      a.targetRotation = Math.sin(a.swayPhase * 0.7) * CONFIG.animation.dance.rotAmount;
       break;
     }
 
     case 'music': {
       // Beat-reactive
-      a.bouncePhase += delta * (2 + energy * 4) * spd;
-      a.swayPhase   += delta * (1 + energy * 2) * spd;
+      a.bouncePhase += delta * (CONFIG.animation.music.bounceBase + energy * CONFIG.animation.music.bounceEnergy) * spd;
+      a.swayPhase   += delta * (CONFIG.animation.music.swayBase + energy * CONFIG.animation.music.swayEnergy) * spd;
 
-      if (energy > AppState.beatThreshold) {
-        a.targetScale = 1 + energy * 0.15;
-        a.targetY     = -energy * 20;
-        a.flashAlpha  = energy;
+      // Use BOTH sustained energy AND spectral flux onset for tight, musical reaction
+      const strongBeat = (energy > AppState.beatThreshold) || (AppState.onset > CONFIG.beat.onsetTrigger);
+
+      if (strongBeat) {
+        // On real percussive hits (onset) we get snappier pops even if RMS energy is moderate
+        const pop = Math.max(energy, AppState.onset * 0.9);
+        a.targetScale = 1 + pop * CONFIG.animation.music.beatScale;
+        a.targetY     = -pop * CONFIG.animation.music.beatY;
+        a.flashAlpha  = Math.max(a.flashAlpha, pop);
         a.flashColor  = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
       } else {
-        a.targetScale = 1 + Math.abs(Math.sin(a.bouncePhase)) * 0.04;
-        a.targetY     = -Math.abs(Math.sin(a.bouncePhase)) * 8;
+        a.targetScale = 1 + Math.abs(Math.sin(a.bouncePhase)) * CONFIG.animation.music.idleScale;
+        a.targetY     = -Math.abs(Math.sin(a.bouncePhase)) * CONFIG.animation.music.idleY;
       }
-      a.targetX     = Math.sin(a.swayPhase) * (5 + energy * 10);
-      a.targetRotation = Math.sin(a.swayPhase * 0.8) * (2 + energy * 4);
 
-      // Shake on strong beat
-      if (energy > 0.75) {
-        a.shakeX = (Math.random() - 0.5) * energy * 8;
-        a.shakeY = (Math.random() - 0.5) * energy * 8;
+      a.targetX     = Math.sin(a.swayPhase) * (CONFIG.animation.music.xBase + energy * CONFIG.animation.music.xEnergy);
+      a.targetRotation = Math.sin(a.swayPhase * 0.8) * (CONFIG.animation.music.rotBase + energy * CONFIG.animation.music.rotEnergy);
+
+      // Shake on strong energy OR strong onset (much more responsive to drums)
+      const doShake = (energy > CONFIG.animation.music.shakeThreshold) || (AppState.onset > 0.65);
+      if (doShake) {
+        const shakeMag = Math.max(energy, AppState.onset) * CONFIG.animation.music.shakeAmount;
+        a.shakeX = (Math.random() - 0.5) * shakeMag;
+        a.shakeY = (Math.random() - 0.5) * shakeMag * 0.7;
       }
       break;
     }
@@ -1265,13 +1737,22 @@ function updateCharacterAnimation(energy, delta) {
       break;
     }
   }
+
+  // Speaking overlay — extra head nods + phase advance while TTS is active
+  // This makes the character feel alive during both voice commands and AI chat replies
+  if (AppState.isSpeaking) {
+    a.speakingPhase += delta * 15 * spd;           // mouth cycle speed
+    const talkBob = Math.sin(a.speakingPhase * 1.55) * 3.2;
+    a.targetY += talkBob;                          // rhythmic nodding
+    a.breathPhase += delta * 1.8;                  // slightly faster breathing
+  }
 }
 
 function updateGlowRings(energy) {
   const size = Math.min(window.innerWidth, window.innerHeight);
-  const base = size * 0.45;
-  const outer = base + energy * base * 0.15;
-  const inner = base * 0.65 + energy * base * 0.1;
+  const base = size * CONFIG.glow.outerBase;
+  const outer = base + energy * base * CONFIG.glow.outerEnergy;
+  const inner = base * CONFIG.glow.innerBase + energy * base * CONFIG.glow.innerEnergy;
 
   UI.glowRingOuter.style.width  = outer + 'px';
   UI.glowRingOuter.style.height = outer + 'px';
@@ -1279,11 +1760,11 @@ function updateGlowRings(energy) {
   UI.glowRingInner.style.height = inner + 'px';
 
   const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
-  const glowSize = 12 + energy * 30;
+  const glowSize = CONFIG.glow.sizeBase + energy * CONFIG.glow.sizeEnergy;
   UI.glowRingOuter.style.boxShadow =
-    `0 0 ${glowSize}px rgba(${hexToRgb(accent)}, ${0.2 + energy * 0.5}),
+    `0 0 ${glowSize}px rgba(${hexToRgb(accent)}, ${CONFIG.glow.alphaBase + energy * CONFIG.glow.alphaEnergy}),
      inset 0 0 ${glowSize * 0.5}px rgba(${hexToRgb(accent)}, ${0.1 + energy * 0.2})`;
-  UI.glowRingOuter.style.borderColor = `rgba(${hexToRgb(accent)}, ${0.3 + energy * 0.5})`;
+  UI.glowRingOuter.style.borderColor = `rgba(${hexToRgb(accent)}, ${0.3 + energy * CONFIG.glow.alphaEnergy})`;
 }
 
 /* ─────────────────────────────────────────────────
@@ -1302,15 +1783,28 @@ function setMode(mode) {
 
 function speak(text) {
   if (!window.speechSynthesis) return;
+
   window.speechSynthesis.cancel();
+  AppState.isSpeaking = false;
+
   const utt = new SpeechSynthesisUtterance(text);
   utt.rate   = 1.05;
   utt.pitch  = 1.1;
   utt.volume = 0.9;
+
   // Try to pick a nice voice
   const voices = window.speechSynthesis.getVoices();
   const preferred = voices.find(v => v.name.includes('Google') && v.lang.startsWith('en'));
   if (preferred) utt.voice = preferred;
+
+  // Track speaking state for visual mouth animation
+  utt.onstart = () => { AppState.isSpeaking = true; };
+  utt.onend   = () => { AppState.isSpeaking = false; AppState.anim.speakingPhase = 0; };
+  utt.onerror = () => { AppState.isSpeaking = false; AppState.anim.speakingPhase = 0; };
+
+  AppState.isSpeaking = true;
+  AppState.anim.speakingPhase = 0;
+
   window.speechSynthesis.speak(utt);
 }
 
@@ -1427,6 +1921,9 @@ function init() {
   // Load saved settings
   loadSettings();
 
+  // Load persisted chat history (after settings + DOM)
+  loadChatHistory();
+
   // Resize and set up canvases
   resizeParticleCanvas();
   resizeCharCanvas();
@@ -1459,7 +1956,7 @@ function init() {
   });
 
   // Handle resize
-  window.addEventListener('resize', debounce(handleResize, 200));
+  window.addEventListener('resize', debounce(handleResize, CONFIG.ui.resizeDebounce));
 
   // Register SW
   registerServiceWorker();
