@@ -402,9 +402,9 @@ function importCharacterAndSettings(file) {
 
       applySettings();
 
-      // Load character if present
+      // Character payloads are intentionally not auto-applied for safety
       if (data.character && data.character.image) {
-        loadCharacterImage(data.character.image); // will also set characterImageDataURL
+        showToast('Preset settings imported. Re-upload character manually.', 'info');
       }
 
       saveSettings(); // persist the imported settings
@@ -708,20 +708,26 @@ function drawPlaceholderCharacter(ctx, w, h, energy) {
 }
 
 /**
- * Load character media (image or MP4) from file or URL into the character slot.
+ * Load character media (image or MP4) from a local Blob/File into the character slot.
  */
-function loadCharacterImage(src, options = {}) {
-  const { isVideo = false, isObjectURL = false } = options;
+function loadCharacterImage(fileOrBlob, options = {}) {
+  const { isVideo = false } = options;
+  if (!(fileOrBlob instanceof Blob)) {
+    AppState._pendingCharacterUploadType = null;
+    showToast('Invalid character file', 'error');
+    return;
+  }
+
+  const objectURL = URL.createObjectURL(fileOrBlob);
   const previousObjectURL = AppState.characterObjectURL;
 
   const media = isVideo ? document.createElement('video') : new Image();
-  media.crossOrigin = 'anonymous';
 
   const onLoad = () => {
-    if (previousObjectURL && previousObjectURL !== src) {
+    if (previousObjectURL && previousObjectURL !== objectURL) {
       URL.revokeObjectURL(previousObjectURL);
     }
-    AppState.characterObjectURL = isObjectURL ? src : null;
+    AppState.characterObjectURL = objectURL;
     AppState.characterImage = media;
     AppState.characterMediaType = isVideo ? 'video' : 'image';
 
@@ -757,9 +763,7 @@ function loadCharacterImage(src, options = {}) {
   };
 
   media.onerror = () => {
-    if (isObjectURL) {
-      URL.revokeObjectURL(src);
-    }
+    URL.revokeObjectURL(objectURL);
     AppState._pendingCharacterUploadType = null;
     showToast(isVideo ? 'Failed to load MP4 character' : 'Failed to load image', 'error');
   };
@@ -771,10 +775,10 @@ function loadCharacterImage(src, options = {}) {
     media.autoplay = true;
     media.preload = 'auto';
     media.onloadeddata = onLoad;
-    media.src = src;
+    media.src = objectURL;
   } else {
     media.onload = onLoad;
-    media.src = src;
+    media.src = objectURL;
   }
 }
 
@@ -1541,7 +1545,7 @@ function wireEvents() {
 
       // Store temporary flag so loadCharacterImage can show the right message
       AppState._pendingCharacterUploadType = isGif ? 'gif' : (isMp4 ? 'mp4' : null);
-      loadCharacterImage(URL.createObjectURL(file), { isVideo: isMp4, isObjectURL: true });
+      loadCharacterImage(file, { isVideo: isMp4 });
     }
     e.target.value = '';
   });
