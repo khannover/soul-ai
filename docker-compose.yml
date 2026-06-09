@@ -1,0 +1,23 @@
+services:
+  web:
+    build: .
+    container_name: soul-ai-web
+    restart: unless-stopped
+    ports:
+      - "8088:80"
+      - "8443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - tts
+
+  tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: soul-ai-tts
+    restart: unless-stopped
+    environment:
+      - API_LOG_LEVEL=warning
+    deploy:
+      resources:
+        limits:
+          memory: 2500M

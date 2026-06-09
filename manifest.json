@@ -1,13 +1,12 @@
 {
-  "name": "Souler Web",
-  "short_name": "Souler",
-  "description": "Your AI Live Speaker companion — dances to music, listens to voice commands, and chats with AI.",
-  "start_url": ".",
+  "name": "Soul-AI",
+  "short_name": "Soul-AI",
+  "description": "Your AI Live Speaker companion — dances to music, listens to your voice, and reacts in real time.",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0f",
   "theme_color": "#0a0a0f",
-  "orientation": "portrait-primary",
-  "categories": ["entertainment", "music"],
+  "orientation": "any",
   "icons": [
     {
       "src": "assets/icon-192.png",
@@ -22,12 +21,12 @@
       "purpose": "any maskable"
     }
   ],
-  "screenshots": [],
+  "categories": ["entertainment", "music"],
   "shortcuts": [
     {
-      "name": "Open Souler",
+      "name": "Open Soul-AI",
       "short_name": "Open",
-      "url": ".",
+      "url": "/",
       "icons": [{ "src": "assets/icon-192.png", "sizes": "192x192" }]
     }
   ]

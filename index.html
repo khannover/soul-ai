@@ -4,54 +4,21 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0a0a0f" />
-  <meta name="description" content="Souler Web — Your AI Live Speaker companion that dances to music, listens to your voice, and reacts in real time." />
+  <meta name="description" data-i18n-content="meta.description" content="Soul-AI — Your AI Live Speaker companion that dances to music, listens to your voice, and reacts in real time." />
 
   <!-- PWA -->
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="assets/icon-192.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="Souler" />
+  <meta name="apple-mobile-web-app-title" content="Soul-AI" />
 
-  <!-- Tailwind CSS via CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            cyber: {
-              bg:    '#0a0a0f',
-              card:  '#12121a',
-              border:'#1e1e2e',
-              neon:  '#00f5ff',
-              pink:  '#ff2d78',
-              purple:'#a855f7',
-              green: '#39ff14',
-              yellow:'#ffd700',
-            }
-          },
-          fontFamily: {
-            mono: ['"Share Tech Mono"', 'monospace'],
-          },
-          boxShadow: {
-            neon:   '0 0 8px #00f5ff, 0 0 20px #00f5ff44',
-            pink:   '0 0 8px #ff2d78, 0 0 20px #ff2d7844',
-            purple: '0 0 8px #a855f7, 0 0 20px #a855f744',
-          }
-        }
-      }
-    };
-  </script>
-
-  <!-- Google Font -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
-
+  <link rel="stylesheet" href="tailwind.css" />
   <link rel="stylesheet" href="style.css" />
   <!-- Inline critical styles: ensure base layout always renders -->
   <style>
-    html,body{height:100%;width:100%;margin:0;padding:0;background:#0a0a0f;color:#fff;font-family:'Share Tech Mono','Courier New',monospace;overflow:hidden;user-select:none;-webkit-user-select:none}
+    html,body{height:100%;width:100%;margin:0;padding:0;background:#0a0a0f;color:#fff;font-family:'Share Tech Mono','Courier New',monospace;overflow:hidden}
     #main-layout{display:flex;flex-direction:column;height:100dvh;height:100vh;width:100vw;position:relative;z-index:10}
     header{display:flex;align-items:center;justify-content:space-between;padding:.5rem 1rem;border-bottom:1px solid #1e1e2e;background:rgba(18,18,26,.8);flex-shrink:0}
     #stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
@@ -89,7 +56,7 @@
     textarea.settings-input{resize:none}
     #btn-save-settings,#btn-reupload{width:100%;padding:.625rem;border-radius:.75rem;border:1px solid #00f5ff;color:#00f5ff;background:rgba(0,245,255,.1);font-size:.875rem;letter-spacing:.1em;cursor:pointer}
   </style>
-  <title>Souler Web — AI Live Speaker</title>
+  <title data-i18n-content="meta.title">Soul-AI — AI Live Speaker</title>
 </head>
 <body class="bg-cyber-bg text-white font-mono overflow-hidden select-none" id="app-body">
 
@@ -102,8 +69,8 @@
     <!-- TOP STATUS BAR -->
     <header class="flex items-center justify-between px-4 py-2 border-b border-cyber-border bg-cyber-card/80 backdrop-blur-md">
       <div class="flex items-center gap-2">
-        <span class="text-cyber-neon text-lg tracking-widest font-bold glow-neon">SOULER</span>
-        <span class="text-xs text-gray-500 hidden sm:inline">AI LIVE SPEAKER</span>
+        <span class="text-cyber-neon text-lg tracking-widest font-bold glow-neon">SOUL-AI</span>
+        <span id="header-tagline" class="text-xs text-gray-500 hidden sm:inline" data-i18n="header.tagline">AI LIVE SPEAKER</span>
       </div>
 
       <!-- Mode indicator -->
@@ -113,7 +80,7 @@
       </div>
 
       <!-- Settings button -->
-      <button id="btn-settings" aria-label="Settings" title="Settings"
+      <button id="btn-settings" data-i18n-aria="aria.settings" data-i18n-title="aria.settings" aria-label="Settings" title="Settings"
         class="p-2 rounded-lg border border-cyber-border hover:border-cyber-neon hover:shadow-neon transition-all duration-300">
         <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -133,7 +100,7 @@
       <!-- Character canvas -->
       <canvas id="character-canvas" class="relative z-10 touch-none"
         style="max-width: 90vmin; max-height: 60vmin; cursor: pointer;"
-        title="Click to upload your character image or MP4 (GIFs use first frame)"></canvas>
+        data-i18n-title="upload.canvasTitle" title="Click to upload your character image or MP4 (GIFs use first frame)"></canvas>
 
       <!-- Upload overlay (shown when no character loaded) -->
       <div id="upload-overlay" class="absolute inset-0 z-20 flex flex-col items-center justify-center pointer-events-none">
@@ -142,8 +109,8 @@
           <svg xmlns="http://www.w3.org/2000/svg" class="w-12 h-12 text-cyber-neon/60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
-          <span class="text-cyber-neon/80 text-sm text-center">Tap to upload your<br/>character image</span>
-          <span class="text-gray-500 text-xs">PNG · JPG · WEBP · GIF (first frame) · MP4 (loop)</span>
+          <span id="upload-hint-text" class="text-cyber-neon/80 text-sm text-center" data-i18n-html="upload.hintHtml">Tap to upload your<br/>character image</span>
+          <span id="upload-formats" class="text-gray-500 text-xs" data-i18n="upload.formats">PNG · JPG · WEBP · GIF (first frame) · MP4 (loop)</span>
         </div>
       </div>
 
@@ -169,12 +136,12 @@
       <!-- Audio Player Row -->
       <div id="player-row" style="display:flex;align-items:center;gap:.375rem;margin-bottom:.5rem">
         <!-- URL / file name display -->
-        <div id="track-info" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem;color:#9ca3af;padding:0 .5rem">
+        <div id="track-info" data-i18n="player.noTrack" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem;color:#9ca3af;padding:0 .5rem">
           No track loaded
         </div>
 
         <!-- Play/Pause -->
-        <button id="btn-play-pause" aria-label="Play/Pause"
+        <button id="btn-play-pause" data-i18n-aria="aria.playPause" aria-label="Play/Pause"
           class="control-btn rounded-lg border border-cyber-neon/40 hover:border-cyber-neon hover:shadow-neon transition-all duration-200"
           style="flex-shrink:0;padding:.5rem;color:#00f5ff;border-color:rgba(0,245,255,.4)">
           <svg id="icon-play" xmlns="http://www.w3.org/2000/svg" style="width:1.25rem;height:1.25rem;display:block" viewBox="0 0 24 24" fill="currentColor">
@@ -186,7 +153,7 @@
         </button>
 
         <!-- Stop -->
-        <button id="btn-stop" aria-label="Stop"
+        <button id="btn-stop" data-i18n-aria="aria.stop" aria-label="Stop"
           class="control-btn rounded-lg border border-cyber-border hover:border-cyber-pink hover:shadow-pink transition-all duration-200"
           style="flex-shrink:0;padding:.5rem">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:1.25rem;height:1.25rem;display:block" viewBox="0 0 24 24" fill="currentColor">
@@ -199,7 +166,7 @@
           style="width:52px;flex-shrink:0;height:4px;appearance:none;-webkit-appearance:none;background:#1e1e2e;border-radius:4px;cursor:pointer;accent-color:#00f5ff" />
 
         <!-- Load file -->
-        <button id="btn-load-file" aria-label="Load audio file"
+        <button id="btn-load-file" data-i18n-aria="aria.loadFile" aria-label="Load audio file"
           class="control-btn rounded-lg border border-cyber-border hover:border-cyber-purple hover:shadow-purple transition-all duration-200"
           style="flex-shrink:0;padding:.5rem">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:1.25rem;height:1.25rem;display:block" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -211,18 +178,46 @@
 
       <!-- URL Input Row -->
       <div id="url-row" style="display:flex;align-items:center;gap:.375rem;margin-bottom:.5rem">
-        <input id="url-input" type="url" placeholder="Paste audio URL here…"
+        <input id="url-input" type="url" data-i18n-placeholder="player.urlPlaceholder" placeholder="Paste audio URL here…"
           style="flex:1;min-width:0;background:#0a0a0f;border:1px solid #1e1e2e;border-radius:.5rem;padding:.25rem .75rem;font-size:.75rem;color:#d1d5db;font-family:inherit;outline:none" />
-        <button id="btn-load-url" class="control-btn px-3 py-1 rounded-lg border border-cyber-neon/50 text-cyber-neon text-xs hover:shadow-neon transition-all">
+        <button id="btn-load-url" data-i18n="player.load" class="control-btn px-3 py-1 rounded-lg border border-cyber-neon/50 text-cyber-neon text-xs hover:shadow-neon transition-all">
           Load
         </button>
+        <button id="btn-playlist-add" data-i18n-title="player.addToPlaylist" title="Add to playlist" data-i18n-aria="player.addToPlaylist" aria-label="Add to playlist"
+          class="control-btn rounded-lg border border-cyber-purple/50 text-cyber-purple text-sm font-bold hover:shadow-purple transition-all"
+          style="flex-shrink:0;padding:.25rem .6rem;line-height:1">+</button>
+      </div>
+
+      <!-- Playlist controls -->
+      <div id="playlist-controls" style="display:flex;align-items:center;gap:.375rem;margin-bottom:.375rem">
+        <button id="btn-playlist-prev" data-i18n-aria="player.prevTrack" aria-label="Previous track"
+          class="control-btn rounded-lg border border-cyber-border hover:border-cyber-neon transition-all"
+          style="flex-shrink:0;padding:.25rem .5rem;font-size:.85rem">‹</button>
+        <button id="btn-playlist-toggle" data-i18n="player.playlist"
+          class="control-btn flex-1 py-1 rounded-lg border border-cyber-border text-xs text-gray-300 hover:border-cyber-neon hover:text-cyber-neon transition-all">
+          Playlist
+        </button>
+        <button id="btn-playlist-next" data-i18n-aria="player.nextTrack" aria-label="Next track"
+          class="control-btn rounded-lg border border-cyber-border hover:border-cyber-neon transition-all"
+          style="flex-shrink:0;padding:.25rem .5rem;font-size:.85rem">›</button>
+        <span id="playlist-count" class="text-[10px] text-gray-500" style="flex-shrink:0;min-width:2.5rem;text-align:right">0/0</span>
+      </div>
+
+      <div id="playlist-panel" class="hidden" style="margin-bottom:.5rem">
+        <ul id="playlist-list" class="playlist-list"></ul>
+        <div style="display:flex;justify-content:flex-end;margin-top:.25rem">
+          <button id="btn-playlist-clear" data-i18n="player.clearPlaylist"
+            class="control-btn px-2 py-1 rounded border border-cyber-border text-[10px] text-gray-500 hover:border-cyber-pink hover:text-cyber-pink transition-all">
+            Clear playlist
+          </button>
+        </div>
       </div>
 
       <!-- Action Buttons Row -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.25rem">
 
         <!-- Mic / env listen -->
-        <button id="btn-mic" aria-label="Toggle microphone listening"
+        <button id="btn-mic" data-i18n-aria="aria.mic" aria-label="Toggle microphone listening"
           class="control-btn flex items-center justify-center gap-1 py-1.5 rounded-lg border border-cyber-border text-xs hover:border-cyber-neon hover:shadow-neon transition-all duration-200" style="width:100%;min-width:0;overflow:hidden">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
@@ -233,16 +228,16 @@
         </button>
 
         <!-- Voice command -->
-        <button id="btn-voice" aria-label="Voice command"
+        <button id="btn-voice" data-i18n-aria="aria.voice" aria-label="Voice command"
           class="control-btn flex items-center justify-center gap-1 py-1.5 rounded-lg border border-cyber-border text-xs hover:border-cyber-purple hover:shadow-purple transition-all duration-200" style="width:100%;min-width:0;overflow:hidden">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
           </svg>
-          <span>VOICE</span>
+          <span id="voice-label" data-i18n="controls.voice">VOICE</span>
         </button>
 
         <!-- Idle/Dance toggle -->
-        <button id="btn-mode-toggle" aria-label="Toggle dance/idle mode"
+        <button id="btn-mode-toggle" data-i18n-aria="aria.modeToggle" aria-label="Toggle dance/idle mode"
           class="control-btn flex items-center justify-center gap-1 py-1.5 rounded-lg border border-cyber-border text-xs hover:border-cyber-pink hover:shadow-pink transition-all duration-200" style="width:100%;min-width:0;overflow:hidden">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -251,12 +246,12 @@
         </button>
 
         <!-- AI Chat button -->
-        <button id="btn-chat" aria-label="AI Chat"
+        <button id="btn-chat" data-i18n-aria="aria.chat" aria-label="AI Chat"
           class="control-btn flex items-center justify-center gap-1 py-1.5 rounded-lg border border-cyber-border text-xs hover:border-cyber-yellow hover:text-cyber-yellow transition-all duration-200" style="width:100%;min-width:0;overflow:hidden">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
           </svg>
-          <span>CHAT</span>
+          <span id="chat-label" data-i18n="controls.chat">CHAT</span>
         </button>
 
       </div>
@@ -271,7 +266,7 @@
     <!-- Panel -->
     <div class="settings-content relative bg-cyber-card border border-cyber-border rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[85vh] overflow-y-auto p-5 shadow-2xl">
       <div class="flex items-center justify-between mb-5">
-        <h2 class="text-cyber-neon text-lg tracking-widest glow-neon">SETTINGS</h2>
+        <h2 id="settings-title" class="text-cyber-neon text-lg tracking-widest glow-neon" data-i18n="settings.title">SETTINGS</h2>
         <button id="btn-close-settings" class="text-gray-400 hover:text-white transition-colors">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -279,114 +274,162 @@
         </button>
       </div>
 
+      <!-- Voice always-on -->
+      <div class="settings-group mb-4">
+        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+          <input id="setting-voice-always-on" type="checkbox" class="accent-cyber-neon" />
+          <span data-i18n="settings.voiceAlwaysOn">Always-on voice commands</span>
+        </label>
+        <p class="text-gray-600 text-xs mt-1" data-i18n="settings.voiceAlwaysOnHint">VOICE button toggles — no need to press before every command.</p>
+      </div>
+
+      <!-- Language -->
+      <div class="settings-group mb-4">
+        <label class="settings-label" data-i18n="settings.language">Language</label>
+        <select id="setting-language" class="settings-input">
+          <option value="en">English</option>
+          <option value="de">Deutsch</option>
+        </select>
+      </div>
+
       <!-- API Key -->
       <div class="settings-group mb-4">
-        <label class="settings-label">OpenAI-Compatible API Key</label>
-        <input id="setting-api-key" type="password" placeholder="sk-… or grok API key"
+        <label class="settings-label" data-i18n="settings.apiKey">OpenAI-Compatible API Key</label>
+        <input id="setting-api-key" type="password" data-i18n-placeholder="settings.apiKeyPlaceholder" placeholder="sk-… or grok API key"
           class="settings-input" autocomplete="off" />
-        <p class="text-gray-600 text-xs mt-1">Used for AI voice chat. Stored only in your browser.</p>
+        <label class="flex items-center gap-2 mt-2 text-xs text-gray-500 cursor-pointer">
+          <input id="setting-remember-api-key" type="checkbox" checked class="accent-cyber-neon" />
+          <span data-i18n="settings.rememberApiKey">Remember API key in this browser</span>
+        </label>
+        <p class="text-gray-600 text-xs mt-1" data-i18n="settings.rememberApiKeyHint">Uncheck for session-only storage. Never share presets with keys inside.</p>
       </div>
 
       <!-- API Base URL -->
       <div class="settings-group mb-4">
-        <label class="settings-label">API Base URL</label>
-        <input id="setting-api-base" type="url" placeholder="https://api.openai.com/v1"
+        <label class="settings-label" data-i18n="settings.apiBase">API Base URL</label>
+        <input id="setting-api-base" type="url" data-i18n-placeholder="settings.apiBasePlaceholder" placeholder="https://api.openai.com/v1"
           class="settings-input" />
       </div>
 
       <!-- Model -->
       <div class="settings-group mb-4">
-        <label class="settings-label">Model</label>
-        <input id="setting-model" type="text" placeholder="gpt-4o-mini"
+        <label class="settings-label" data-i18n="settings.model">Model</label>
+        <input id="setting-model" type="text" data-i18n-placeholder="settings.modelPlaceholder" placeholder="gpt-4o-mini"
           class="settings-input" />
       </div>
 
       <!-- Volume -->
       <div class="settings-group mb-4">
-        <label class="settings-label">Master Volume <span id="vol-display" class="text-cyber-neon">80%</span></label>
+        <label class="settings-label"><span data-i18n="settings.volume">Master Volume</span> <span id="vol-display" class="text-cyber-neon">80%</span></label>
         <input id="setting-volume" type="range" min="0" max="1" step="0.01" value="0.8"
           class="w-full h-1 appearance-none bg-cyber-border rounded-full cursor-pointer accent-cyber-neon" />
       </div>
 
       <!-- Beat Sensitivity -->
       <div class="settings-group mb-4">
-        <label class="settings-label">Beat Sensitivity <span id="sens-display" class="text-cyber-neon">50%</span></label>
+        <label class="settings-label"><span data-i18n="settings.sensitivity">Beat Sensitivity</span> <span id="sens-display" class="text-cyber-neon">50%</span></label>
         <input id="setting-sensitivity" type="range" min="0" max="1" step="0.01" value="0.5"
           class="w-full h-1 appearance-none bg-cyber-border rounded-full cursor-pointer accent-cyber-neon" />
       </div>
 
       <!-- Theme -->
       <div class="settings-group mb-4">
-        <label class="settings-label">Accent Theme</label>
+        <label class="settings-label" data-i18n="settings.theme">Accent Theme</label>
         <div class="flex gap-3 mt-2">
           <button class="theme-swatch w-8 h-8 rounded-full border-2 border-transparent transition-all" data-theme="neon"
-            style="background:#00f5ff;" title="Neon Cyan"></button>
+            style="background:#00f5ff;" data-i18n-title="settings.themeNeon" title="Neon Cyan"></button>
           <button class="theme-swatch w-8 h-8 rounded-full border-2 border-transparent transition-all" data-theme="pink"
-            style="background:#ff2d78;" title="Hot Pink"></button>
+            style="background:#ff2d78;" data-i18n-title="settings.themePink" title="Hot Pink"></button>
           <button class="theme-swatch w-8 h-8 rounded-full border-2 border-transparent transition-all" data-theme="purple"
-            style="background:#a855f7;" title="Purple"></button>
+            style="background:#a855f7;" data-i18n-title="settings.themePurple" title="Purple"></button>
           <button class="theme-swatch w-8 h-8 rounded-full border-2 border-transparent transition-all" data-theme="green"
-            style="background:#39ff14;" title="Neon Green"></button>
+            style="background:#39ff14;" data-i18n-title="settings.themeGreen" title="Neon Green"></button>
           <button class="theme-swatch w-8 h-8 rounded-full border-2 border-transparent transition-all" data-theme="yellow"
-            style="background:#ffd700;" title="Gold"></button>
+            style="background:#ffd700;" data-i18n-title="settings.themeYellow" title="Gold"></button>
         </div>
       </div>
 
       <!-- Animation Speed -->
       <div class="settings-group mb-4">
-        <label class="settings-label">Animation Speed <span id="speed-display" class="text-cyber-neon">1.0x</span></label>
+        <label class="settings-label"><span data-i18n="settings.animSpeed">Animation Speed</span> <span id="speed-display" class="text-cyber-neon">1.0x</span></label>
         <input id="setting-speed" type="range" min="0.3" max="2.0" step="0.1" value="1.0"
           class="w-full h-1 appearance-none bg-cyber-border rounded-full cursor-pointer accent-cyber-neon" />
       </div>
 
       <!-- Character image re-upload + export/import -->
       <div class="settings-group mb-4">
-        <label class="settings-label">Character Image</label>
-        <button id="btn-reupload"
+        <label class="settings-label" data-i18n="settings.character">Character Image</label>
+        <button id="btn-reupload" data-i18n="settings.reupload"
           class="w-full py-2 mt-1 rounded-lg border border-cyber-border text-sm text-gray-300 hover:border-cyber-neon hover:text-cyber-neon hover:shadow-neon transition-all">
           Upload New Character
         </button>
 
         <!-- Export / Import row -->
         <div class="flex gap-2 mt-2">
-          <button id="btn-export-preset"
+          <button id="btn-export-preset" data-i18n="settings.exportPreset"
             class="flex-1 py-2 rounded-lg border border-cyber-purple/60 text-cyber-purple text-xs hover:border-cyber-purple hover:shadow-purple transition-all">
             Export Preset
           </button>
-          <button id="btn-import-preset"
+          <button id="btn-import-preset" data-i18n="settings.importPreset"
             class="flex-1 py-2 rounded-lg border border-cyber-border text-gray-400 text-xs hover:border-cyber-neon hover:text-cyber-neon transition-all">
             Import Preset
           </button>
         </div>
         <input type="file" id="preset-file-input" accept="application/json,.json" class="hidden" />
-        <p class="text-gray-600 text-[10px] mt-1">Exports your character + settings (no API key). Shareable .json file.</p>
+        <p class="text-gray-600 text-[10px] mt-1" data-i18n="settings.presetHint">Exports your character + settings (no API key). Shareable .json file.</p>
+      </div>
+
+      <!-- TTS (Kokoro / bancamp) -->
+      <div class="settings-group mb-4">
+        <label class="settings-label" data-i18n="settings.ttsEngine">Voice Engine</label>
+        <select id="setting-tts-engine" class="settings-input">
+          <option value="auto" data-i18n="settings.ttsEngineAuto">Auto (Kokoro EN / Browser DE)</option>
+          <option value="kokoro" data-i18n="settings.ttsEngineKokoro">Kokoro (Bella — bancamp TTS)</option>
+          <option value="browser" data-i18n="settings.ttsEngineBrowser">Browser only</option>
+        </select>
+      </div>
+      <div class="settings-group mb-4">
+        <label class="settings-label" data-i18n="settings.ttsVoice">Kokoro Voice</label>
+        <select id="setting-tts-voice" class="settings-input">
+          <option value="af_bella">af_bella</option>
+          <option value="af_sarah">af_sarah</option>
+          <option value="am_adam">am_adam</option>
+          <option value="am_michael">am_michael</option>
+          <option value="bf_emma">bf_emma</option>
+          <option value="bm_george">bm_george</option>
+        </select>
+      </div>
+      <div class="settings-group mb-4">
+        <label class="settings-label"><span data-i18n="settings.ttsSpeed">Speech Speed</span> <span id="tts-speed-display" class="text-cyber-neon">1.05x</span></label>
+        <input id="setting-tts-speed" type="range" min="0.7" max="1.4" step="0.05" value="1.05"
+          class="w-full h-1 appearance-none bg-cyber-border rounded-full cursor-pointer accent-cyber-neon" />
       </div>
 
       <!-- AI system prompt -->
       <div class="settings-group mb-4">
-        <label class="settings-label">AI System Prompt</label>
-        <textarea id="setting-system-prompt" rows="3" placeholder="You are Souler, a friendly AI music companion…"
+        <label class="settings-label" data-i18n="settings.systemPrompt">AI System Prompt</label>
+        <textarea id="setting-system-prompt" rows="3" data-i18n-placeholder="settings.systemPromptPlaceholder" placeholder="You are Soul-AI, a friendly AI music companion…"
           class="settings-input resize-none"></textarea>
       </div>
 
       <!-- Save button -->
-      <button id="btn-save-settings"
+      <button id="btn-save-settings" data-i18n="settings.save"
         class="w-full py-2.5 rounded-xl bg-cyber-neon/10 border border-cyber-neon text-cyber-neon text-sm tracking-widest hover:bg-cyber-neon/20 hover:shadow-neon transition-all">
         SAVE SETTINGS
       </button>
 
-      <p class="text-center text-gray-600 text-xs mt-3">Settings saved locally in your browser</p>
+      <p class="text-center text-gray-600 text-xs mt-3" data-i18n="settings.savedLocally">Settings saved locally in your browser</p>
     </div>
   </div>
 
   <!-- ===== AI CHAT PANEL ===== -->
   <div id="chat-panel" class="fixed inset-0 z-50 hidden flex flex-col">
-    <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
+    <div id="chat-backdrop" class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
     <div class="relative bg-cyber-card flex flex-col h-full sm:h-auto sm:max-h-[70vh] sm:w-full sm:max-w-md sm:mx-auto sm:mt-auto sm:mb-0 sm:rounded-t-2xl border-t border-cyber-border p-4 mt-auto">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="text-cyber-purple text-base tracking-widest" style="text-shadow:0 0 8px #a855f7">AI CHAT</h2>
+        <h2 id="chat-title" class="text-cyber-purple text-base tracking-widest" style="text-shadow:0 0 8px #a855f7" data-i18n="chat.title">AI CHAT</h2>
         <div class="flex items-center gap-2">
-          <button id="btn-clear-chat" class="text-xs text-gray-500 hover:text-cyber-pink transition-colors px-2 py-0.5 rounded border border-cyber-border hover:border-cyber-pink">Clear</button>
+          <button id="btn-clear-chat" data-i18n="chat.clear" class="text-xs text-gray-500 hover:text-cyber-pink transition-colors px-2 py-0.5 rounded border border-cyber-border hover:border-cyber-pink">Clear</button>
           <button id="btn-close-chat" class="text-gray-400 hover:text-white transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -397,19 +440,19 @@
 
       <!-- Messages -->
       <div id="chat-messages" class="flex-1 overflow-y-auto space-y-3 mb-3 min-h-[200px] max-h-[40vh]">
-        <div class="text-gray-500 text-xs text-center mt-8">Say "chat" or tap the ⚡ button to start talking to Souler.</div>
+        <div id="chat-empty-hint" class="text-gray-500 text-xs text-center mt-8" data-i18n="chat.empty">Say "chat" or tap the CHAT button to start talking to Soul-AI.</div>
       </div>
 
       <!-- Input row -->
       <div class="flex gap-2">
-        <input id="chat-input" type="text" placeholder="Type a message…"
+        <input id="chat-input" type="text" data-i18n-placeholder="chat.placeholder" placeholder="Type a message…"
           class="flex-1 bg-cyber-bg border border-cyber-border rounded-lg px-3 py-2 text-sm text-gray-300 placeholder-gray-600
                  focus:outline-none focus:border-cyber-purple transition-all" />
-        <button id="btn-send-chat"
+        <button id="btn-send-chat" data-i18n="chat.send"
           class="px-3 py-2 rounded-lg border border-cyber-purple text-cyber-purple text-xs hover:shadow-purple transition-all">
           SEND
         </button>
-        <button id="btn-voice-chat" aria-label="Voice input"
+        <button id="btn-voice-chat" data-i18n-aria="aria.voiceInput" aria-label="Voice input"
           class="px-3 py-2 rounded-lg border border-cyber-border text-gray-400 hover:border-cyber-purple hover:text-cyber-purple transition-all">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
@@ -432,13 +475,13 @@
   <div id="perm-overlay" class="fixed inset-0 z-[200] hidden flex items-center justify-center bg-black/80 backdrop-blur-sm">
     <div class="bg-cyber-card border border-cyber-border rounded-2xl p-6 max-w-sm mx-4 text-center">
       <div id="perm-icon" class="text-4xl mb-3">🎤</div>
-      <h3 id="perm-title" class="text-white text-base font-bold mb-2">Microphone Access</h3>
-      <p id="perm-message" class="text-gray-400 text-sm mb-4">Souler needs microphone access to listen for music and voice commands.</p>
+      <h3 id="perm-title" class="text-white text-base font-bold mb-2" data-i18n="perm.title">Microphone Access</h3>
+      <p id="perm-message" class="text-gray-400 text-sm mb-4" data-i18n="perm.message">Soul-AI needs microphone access to listen for music and voice commands.</p>
       <div class="flex gap-3">
-        <button id="perm-deny" class="flex-1 py-2 rounded-lg border border-cyber-border text-gray-400 text-sm hover:border-white transition-all">
+        <button id="perm-deny" data-i18n="perm.deny" class="flex-1 py-2 rounded-lg border border-cyber-border text-gray-400 text-sm hover:border-white transition-all">
           Not now
         </button>
-        <button id="perm-allow" class="flex-1 py-2 rounded-lg bg-cyber-neon/10 border border-cyber-neon text-cyber-neon text-sm hover:bg-cyber-neon/20 hover:shadow-neon transition-all">
+        <button id="perm-allow" data-i18n="perm.allow" class="flex-1 py-2 rounded-lg bg-cyber-neon/10 border border-cyber-neon text-cyber-neon text-sm hover:bg-cyber-neon/20 hover:shadow-neon transition-all">
           Allow
         </button>
       </div>
@@ -446,6 +489,6 @@
   </div>
 
   <!-- Main app script -->
-  <script src="app.js"></script>
+  <script type="module" src="app.js?v=2.5.0"></script>
 </body>
 </html>

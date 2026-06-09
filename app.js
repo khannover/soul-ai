@@ -1,7 +1,7 @@
 /**
- * Souler Web — app.js
- * ===================
- * Main application logic for the Souler AI Live Speaker experience.
+ * Soul-AI — app.js
+ * ================
+ * Main application logic for the Soul-AI Live Speaker experience.
  *
  * Sections:
  *  1. State Management
@@ -19,7 +19,139 @@
  * 13. PWA & Initialization
  */
 
-'use strict';
+import {
+  APP_SLUG,
+  APP_VERSION,
+  readStoredJson,
+  STORAGE_KEYS,
+  adjacentPlaylistIndex,
+  beatThresholdFromSensitivity,
+  clampPlaylistIndex,
+  createPlaylistItemId,
+  escapeHtml,
+  isValidPreset,
+  matchVoiceCommand,
+  normalizePlaylistItem,
+  playlistDisplayTitle,
+  playlistTitleFromUrl,
+} from './core.mjs';
+import {
+  deleteBlob,
+  loadBlob,
+  loadCharacter,
+  loadSession,
+  migrateLegacyStorage,
+  saveBlob,
+  saveCharacter,
+  saveSession,
+} from './storage.mjs';
+import {
+  defaultSystemPrompt,
+  detectLocale,
+  getLocale,
+  modeLabel,
+  setLocale,
+  speechRecognitionLang,
+  speechSynthesisLang,
+  t,
+  isLikelyVoiceEcho,
+  voicePatterns,
+  voiceReply,
+} from './i18n.mjs';
+import {
+  DEFAULT_TTS_SPEED,
+  DEFAULT_TTS_VOICE,
+  resolveTtsEngine,
+  synthesizeKokoro,
+  truncateForTts,
+} from './tts.mjs';
+
+/* ─────────────────────────────────────────────────
+   CONFIG — All tunable constants in one place
+   ───────────────────────────────────────────────── */
+const CONFIG = {
+  audio: {
+    fftSize: 256,
+    playerSmoothing: 0.8,
+    micSmoothing: 0.7,
+    energyFocusRatio: 0.5,
+    peakDecay: 0.995,
+    minPeak: 0.01,
+  },
+  particles: {
+    initialCount: 60,
+    maxCount: 150,
+    baseSpeed: 0.3,
+    lifeDecay: 0.003,
+    connectionDistance: 80,
+    burstMultiplier: 5,
+    burstEnergyThreshold: 0.7,
+    burstSpread: 200,
+    burstVelocity: 2,
+    burstRadius: [1, 3],
+  },
+  character: {
+    maxCanvasSize: 420,
+    maxUploadBytes: 25 * 1024 * 1024,
+    sizeLandscape: 0.85,
+    sizePortrait: 0.75,
+    shadowBase: 20,
+    shadowEnergy: 40,
+    flashThreshold: 0.01,
+    flashAlphaMul: 0.3,
+  },
+  animation: {
+    lerp: { scale: 0.12, rotation: 0.1, position: 0.1, flash: 0.88 },
+    idle: { breathSpeed: 0.8, breathAmount: 0.02, floatAmount: 3, blinkMin: 3.5, blinkRandom: 2 },
+    dance: { bounceSpeed: 3, swaySpeed: 1.5, scaleAmount: 0.08, yAmount: 18, xAmount: 10, rotAmount: 3 },
+    music: {
+      bounceBase: 2, bounceEnergy: 4, swayBase: 1, swayEnergy: 2,
+      beatScale: 0.15, beatY: 20, idleScale: 0.04, idleY: 8,
+      xBase: 5, xEnergy: 10, rotBase: 2, rotEnergy: 4,
+      shakeThreshold: 0.75, shakeAmount: 8,
+    },
+  },
+  mic: {
+    highpassHz: 100,
+    humBinSkipRatio: 0.1,
+    bassBinEndRatio: 0.4,
+    confirmFrames: 18,
+    constraints: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  },
+  beat: {
+    defaultThreshold: 0.15,
+    sensitivityHigh: 0.3,
+    sensitivityLow: 0.05,
+    envMicFactor: 0.5,
+    envMicCap: 0.3,
+    visualizerMaxH: 55,
+    visualizerHueShift: 50,
+    onsetDecay: 0.92,
+    onsetNormDiv: 80,
+    onsetTrigger: 0.55,
+  },
+  glow: {
+    outerBase: 0.45, innerBase: 0.65, outerEnergy: 0.15, innerEnergy: 0.1,
+    sizeBase: 12, sizeEnergy: 30, alphaBase: 0.2, alphaEnergy: 0.5,
+  },
+  ui: {
+    chatHistoryLimit: 30,
+    aiPromptTurns: 10,
+    aiMaxTokens: 120,
+    toastDuration: 3000,
+    voiceFeedbackDuration: 2500,
+    voicePostTtsUnlockMs: 1400,
+    voiceNoTtsUnlockMs: 500,
+    voiceCommandCooldownMs: 2200,
+    voiceTranscriptDedupeMs: 4500,
+    resizeDebounce: 200,
+    animationDeltaCap: 0.1,
+  },
+};
 
 /* ─────────────────────────────────────────────────
    1. STATE MANAGEMENT
@@ -35,8 +167,13 @@ const AppState = {
   analyser: null,
   playerSource: null,     // MediaElementAudioSourceNode
   micSource: null,        // MediaStreamAudioSourceNode
+  micHighpass: null,      // cuts 50/60 Hz hum before analysis
   micStream: null,
   audioElement: new Audio(),
+  audioObjectURL: null,
+  cachedAccentColor: '#00f5ff',
+  chatInFlight: false,
+  reducedMotion: false,
   lastAudioSource: null,   // 'file' | 'url'
   isPlaying: false,
   isMicListening: false,
@@ -55,6 +192,10 @@ const AppState = {
   particles: [],
   vizBars: [],
   chatHistory: [],
+  playlist: [],
+  playlistIndex: -1,
+  playlistPanelOpen: false,
+  _persistSessionTimer: null,
   settings: {
     apiKey: '',
     apiBase: 'https://api.openai.com/v1',
@@ -63,7 +204,13 @@ const AppState = {
     sensitivity: 0.5,
     theme: 'neon',
     animSpeed: 1.0,
-    systemPrompt: 'You are Souler, a fun and friendly AI music companion. Keep responses concise and upbeat. You love music, dancing, and making people smile. Max 2 sentences.',
+    systemPrompt: '',
+    rememberApiKey: true,
+    locale: '',
+    ttsEngine: 'auto',
+    ttsVoice: DEFAULT_TTS_VOICE,
+    ttsSpeed: DEFAULT_TTS_SPEED,
+    voiceAlwaysOn: false,
   },
 
   // Character animation state
@@ -96,149 +243,57 @@ const AppState = {
 };
 
 /* ─────────────────────────────────────────────────
-   CONFIG — All tunable constants in one place
-   Makes animation, particles, audio, and thresholds easy to tweak.
-   ───────────────────────────────────────────────── */
-const CONFIG = {
-  // Audio analysis
-  audio: {
-    fftSize: 256,
-    playerSmoothing: 0.8,
-    micSmoothing: 0.7,
-    energyFocusRatio: 0.5,
-    peakDecay: 0.995,
-    minPeak: 0.01,
-  },
-
-  // Particle system
-  particles: {
-    initialCount: 60,
-    maxCount: 150,
-    baseSpeed: 0.3,
-    lifeDecay: 0.003,
-    connectionDistance: 80,
-    burstMultiplier: 5,
-    burstEnergyThreshold: 0.7,
-    burstSpread: 200,
-    burstVelocity: 2,
-    burstRadius: [1, 3],
-  },
-
-  // Character canvas & rendering
-  character: {
-    maxCanvasSize: 420,
-    maxUploadBytes: 25 * 1024 * 1024, // 25MB
-    sizeLandscape: 0.85,
-    sizePortrait: 0.75,
-    shadowBase: 20,
-    shadowEnergy: 40,
-    flashThreshold: 0.01,
-    flashAlphaMul: 0.3,
-  },
-
-  // Animation lerps and motion parameters
-  animation: {
-    lerp: {
-      scale: 0.12,
-      rotation: 0.1,
-      position: 0.1,
-      flash: 0.88,
-    },
-    idle: {
-      breathSpeed: 0.8,
-      breathAmount: 0.02,
-      floatAmount: 3,
-      blinkMin: 3.5,
-      blinkRandom: 2,
-    },
-    dance: {
-      bounceSpeed: 3,
-      swaySpeed: 1.5,
-      scaleAmount: 0.08,
-      yAmount: 18,
-      xAmount: 10,
-      rotAmount: 3,
-    },
-    music: {
-      bounceBase: 2,
-      bounceEnergy: 4,
-      swayBase: 1,
-      swayEnergy: 2,
-      beatScale: 0.15,
-      beatY: 20,
-      idleScale: 0.04,
-      idleY: 8,
-      xBase: 5,
-      xEnergy: 10,
-      rotBase: 2,
-      rotEnergy: 4,
-      shakeThreshold: 0.75,
-      shakeAmount: 8,
-    },
-  },
-
-  // Beat detection & visualizer
-  beat: {
-    defaultThreshold: 0.15,
-    sensitivityHigh: 0.3,
-    sensitivityLow: 0.05,
-    envMicFactor: 0.5,
-    envMicCap: 0.3,
-    visualizerMaxH: 55,
-    visualizerHueShift: 50,
-
-    // Onset detection (spectral flux) — makes dancing feel much tighter on beats
-    onsetDecay: 0.92,
-    onsetNormDiv: 80,         // divisor for raw flux → 0-1 normalization
-    onsetTrigger: 0.55,       // when onset exceeds this, treat as strong beat
-  },
-
-  // Glow rings around character
-  glow: {
-    outerBase: 0.45,
-    innerBase: 0.65,
-    outerEnergy: 0.15,
-    innerEnergy: 0.1,
-    sizeBase: 12,
-    sizeEnergy: 30,
-    alphaBase: 0.2,
-    alphaEnergy: 0.5,
-  },
-
-  // UI, chat, AI, timing
-  ui: {
-    chatHistoryLimit: 30,
-    aiPromptTurns: 10,
-    aiMaxTokens: 120,
-    toastDuration: 3000,
-    voiceFeedbackDuration: 2500,
-    resizeDebounce: 200,
-    animationDeltaCap: 0.1,
-  },
-};
-
-/* ─────────────────────────────────────────────────
    2. SETTINGS
    ───────────────────────────────────────────────── */
 
 function loadSettings() {
   try {
-    const saved = JSON.parse(localStorage.getItem('souler-settings') || '{}');
+    const saved = readStoredJson(STORAGE_KEYS.settings, STORAGE_KEYS.legacy.settings) || {};
     Object.assign(AppState.settings, saved);
+    if (AppState.settings.rememberApiKey === undefined) {
+      AppState.settings.rememberApiKey = true;
+    }
+    if (!AppState.settings.rememberApiKey) {
+      let sessionKey = sessionStorage.getItem(STORAGE_KEYS.apiKeySession);
+      if (!sessionKey) {
+        sessionKey = sessionStorage.getItem(STORAGE_KEYS.legacy.apiKeySession);
+        if (sessionKey) sessionStorage.setItem(STORAGE_KEYS.apiKeySession, sessionKey);
+      }
+      if (sessionKey) AppState.settings.apiKey = sessionKey;
+    }
   } catch (e) {
     console.warn('Settings load error:', e);
   }
+
+  const locale = detectLocale(AppState.settings.locale);
+  AppState.settings.locale = locale;
+  setLocale(locale);
+  if (!AppState.settings.systemPrompt) {
+    AppState.settings.systemPrompt = defaultSystemPrompt(locale);
+  }
+
   applySettings();
 }
 
-function saveSettings() {
+function persistSettings({ showSavedToast = true } = {}) {
   try {
-    localStorage.setItem('souler-settings', JSON.stringify(AppState.settings));
+    const payload = { ...AppState.settings };
+    if (!payload.rememberApiKey) {
+      sessionStorage.setItem(STORAGE_KEYS.apiKeySession, payload.apiKey || '');
+      payload.apiKey = '';
+    } else {
+      sessionStorage.removeItem(STORAGE_KEYS.apiKeySession);
+    }
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(payload));
   } catch (e) {
     console.warn('Settings save error:', e);
   }
   applySettings();
-  showToast('Settings saved', 'success');
+  if (showSavedToast) showToast(t('toast.settingsSaved'), 'success');
+}
+
+function saveSettings() {
+  persistSettings({ showSavedToast: true });
 }
 
 function applySettings() {
@@ -248,8 +303,7 @@ function applySettings() {
   UI.volumeSlider.value = s.volume;
   UI.settingVolume.value = s.volume;
   UI.volDisplay.textContent = Math.round(s.volume * 100) + '%';
-  // Sensitivity — map 0–1 → beat threshold (high sens = lower threshold)
-  AppState.beatThreshold = CONFIG.beat.sensitivityHigh - s.sensitivity * (CONFIG.beat.sensitivityHigh - CONFIG.beat.sensitivityLow);
+  AppState.beatThreshold = beatThresholdFromSensitivity(s.sensitivity, CONFIG.beat);
   UI.settingSensitivity.value = s.sensitivity;
   UI.sensDisplay.textContent = Math.round(s.sensitivity * 100) + '%';
   // Speed
@@ -260,6 +314,28 @@ function applySettings() {
   UI.settingApiBase.value = s.apiBase;
   UI.settingModel.value = s.model;
   UI.settingSystemPrompt.value = s.systemPrompt;
+  if (UI.settingRememberApiKey) {
+    UI.settingRememberApiKey.checked = s.rememberApiKey !== false;
+  }
+  if (UI.settingLanguage) {
+    UI.settingLanguage.value = s.locale || getLocale();
+  }
+  if (UI.settingTtsEngine) {
+    UI.settingTtsEngine.value = s.ttsEngine || 'auto';
+  }
+  if (UI.settingTtsVoice) {
+    UI.settingTtsVoice.value = s.ttsVoice || DEFAULT_TTS_VOICE;
+  }
+  if (UI.settingTtsSpeed) {
+    UI.settingTtsSpeed.value = s.ttsSpeed ?? DEFAULT_TTS_SPEED;
+    if (UI.ttsSpeedDisplay) {
+      UI.ttsSpeedDisplay.textContent = Number(s.ttsSpeed ?? DEFAULT_TTS_SPEED).toFixed(2) + 'x';
+    }
+  }
+  if (UI.settingVoiceAlwaysOn) {
+    UI.settingVoiceAlwaysOn.checked = Boolean(s.voiceAlwaysOn);
+  }
+  updateVoiceButtonState();
   // Theme
   setAccentTheme(s.theme, false);
   // Swatches
@@ -274,7 +350,7 @@ function applySettings() {
 
 function loadChatHistory() {
   try {
-    const saved = JSON.parse(localStorage.getItem('souler-chat-history') || '[]');
+    const saved = readStoredJson(STORAGE_KEYS.chatHistory, STORAGE_KEYS.legacy.chatHistory) || [];
     AppState.chatHistory = Array.isArray(saved) ? saved.slice(-CONFIG.ui.chatHistoryLimit) : [];
   } catch (e) {
     console.warn('Chat history load error:', e);
@@ -285,10 +361,53 @@ function loadChatHistory() {
 
 function saveChatHistory() {
   try {
-    localStorage.setItem('souler-chat-history', JSON.stringify(AppState.chatHistory.slice(-CONFIG.ui.chatHistoryLimit)));
+    localStorage.setItem(STORAGE_KEYS.chatHistory, JSON.stringify(AppState.chatHistory.slice(-CONFIG.ui.chatHistoryLimit)));
   } catch (e) {
     console.warn('Chat history save error:', e);
   }
+}
+
+function applyTranslations() {
+  const locale = getLocale();
+  document.documentElement.lang = locale;
+
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  document.querySelectorAll('[data-i18n-html]').forEach((el) => {
+    el.innerHTML = t(el.dataset.i18nHtml);
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+    el.title = t(el.dataset.i18nTitle);
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach((el) => {
+    el.setAttribute('aria-label', t(el.dataset.i18nAria));
+  });
+
+  const metaDesc = document.querySelector('meta[name="description"]');
+  if (metaDesc) metaDesc.content = t('meta.description');
+  document.title = t('meta.title');
+
+  refreshDynamicLabels();
+}
+
+function refreshDynamicLabels() {
+  setMode(AppState.mode);
+  UI.micLabel.textContent = AppState.isMicListening ? t('controls.micOn') : t('controls.mic');
+  if (!AppState.audioElement?.src) {
+    UI.trackInfo.textContent = t('player.noTrack');
+  }
+}
+
+function changeLocale(locale) {
+  AppState.settings.locale = locale;
+  setLocale(locale);
+  applyTranslations();
+  applyRecognitionConfig();
+  renderChatHistory();
 }
 
 function renderChatHistory() {
@@ -299,7 +418,8 @@ function renderChatHistory() {
   if (AppState.chatHistory.length === 0) {
     const ph = document.createElement('div');
     ph.className = 'text-gray-500 text-xs text-center mt-8';
-    ph.textContent = 'Say "chat" or tap the ⚡ button to start talking to Souler.';
+    ph.id = 'chat-empty-hint';
+    ph.textContent = t('chat.empty');
     container.appendChild(ph);
     return;
   }
@@ -319,9 +439,9 @@ function renderChatHistory() {
 
 function clearChatHistory() {
   AppState.chatHistory = [];
-  localStorage.removeItem('souler-chat-history');
+  localStorage.removeItem(STORAGE_KEYS.chatHistory);
   renderChatHistory();
-  showToast('Chat history cleared', 'info');
+  showToast(t('toast.chatCleared'), 'info');
 }
 
 /* ─────────────────────────────────────────────────
@@ -340,6 +460,11 @@ function exportCharacterAndSettings() {
     theme: s.theme,
     animSpeed: s.animSpeed,
     systemPrompt: s.systemPrompt,
+    locale: s.locale || getLocale(),
+    ttsEngine: s.ttsEngine || 'auto',
+    ttsVoice: s.ttsVoice || DEFAULT_TTS_VOICE,
+    ttsSpeed: s.ttsSpeed ?? DEFAULT_TTS_SPEED,
+    voiceAlwaysOn: Boolean(s.voiceAlwaysOn),
   };
 
   const payload = {
@@ -360,7 +485,7 @@ function exportCharacterAndSettings() {
   const a = document.createElement('a');
   const date = new Date().toISOString().slice(0, 10);
   a.href = url;
-  a.download = `souler-preset-${date}.json`;
+  a.download = `${APP_SLUG}-preset-${date}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -368,11 +493,11 @@ function exportCharacterAndSettings() {
 
   const hasExportedCharacter = Boolean(payload.character);
   if (hasExportedCharacter) {
-    showToast('Preset exported (settings + character)', 'success');
+    showToast(t('toast.presetExportedFull'), 'success');
   } else if (AppState.characterMediaType === 'video' && AppState.characterImage) {
-    showToast('Preset exported (settings only). MP4 character is not embedded.', 'info');
+    showToast(t('toast.presetExportedNoChar'), 'info');
   } else {
-    showToast('Preset exported (settings only)', 'success');
+    showToast(t('toast.presetExportedSettings'), 'success');
   }
 }
 
@@ -384,7 +509,7 @@ function importCharacterAndSettings(file) {
     try {
       const data = JSON.parse(e.target.result);
 
-      if (!data || data.version !== 1) {
+      if (!isValidPreset(data)) {
         throw new Error('Unsupported preset version');
       }
 
@@ -399,24 +524,44 @@ function importCharacterAndSettings(file) {
       if (incoming.theme) s.theme = incoming.theme;
       if (typeof incoming.animSpeed === 'number') s.animSpeed = Math.max(0.3, Math.min(2, incoming.animSpeed)); // keep user-facing range simple
       if (incoming.systemPrompt) s.systemPrompt = incoming.systemPrompt;
+      if (incoming.locale) changeLocale(incoming.locale);
+      if (incoming.ttsEngine) s.ttsEngine = incoming.ttsEngine;
+      if (incoming.ttsVoice) s.ttsVoice = incoming.ttsVoice;
+      if (typeof incoming.ttsSpeed === 'number') s.ttsSpeed = incoming.ttsSpeed;
+      if (typeof incoming.voiceAlwaysOn === 'boolean') s.voiceAlwaysOn = incoming.voiceAlwaysOn;
 
       applySettings();
 
-      // Character payloads are intentionally not auto-applied for safety
       if (data.character && data.character.image) {
-        showToast('Preset settings imported. Re-upload character manually.', 'info');
+        if (confirm(t('toast.importCharConfirm'))) {
+          applyPresetCharacter(data.character.image);
+        } else {
+          showToast(t('toast.presetImportedSkipped'), 'info');
+        }
       }
 
-      saveSettings(); // persist the imported settings
-      showToast('Preset imported successfully!', 'success');
+      persistSettings({ showSavedToast: false });
+      showToast(t('toast.presetImported'), 'success');
 
     } catch (err) {
       console.error(err);
-      showToast('Failed to import preset: ' + err.message, 'error');
+      showToast(t('toast.presetImportFailed', { error: err.message }), 'error');
     }
   };
-  reader.onerror = () => showToast('Could not read preset file', 'error');
+  reader.onerror = () => showToast(t('toast.presetReadFailed'), 'error');
   reader.readAsText(file);
+}
+
+async function applyPresetCharacter(imageDataUrl) {
+  try {
+    const res = await fetch(imageDataUrl);
+    const blob = await res.blob();
+    loadCharacterImage(blob, { isVideo: false });
+    showToast(t('toast.charImported'), 'success');
+  } catch (err) {
+    console.error(err);
+    showToast(t('toast.charImportFailed'), 'error');
+  }
 }
 
 /* ─────────────────────────────────────────────────
@@ -451,15 +596,58 @@ function createParticle() {
   };
 }
 
-function updateParticles(energy) {
-  const speedMult = 1 + energy * 3; // could expose energy multiplier later
-  const accentColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
+function drawParticleConnections(particles, maxDist) {
+  const cell = maxDist;
+  const buckets = new Map();
 
+  particles.forEach((p, idx) => {
+    const key = `${Math.floor(p.x / cell)},${Math.floor(p.y / cell)}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(idx);
+  });
+
+  const offsets = [
+    [0, 0], [1, 0], [-1, 0], [0, 1], [0, -1],
+    [1, 1], [1, -1], [-1, 1], [-1, -1],
+  ];
+
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    const cx = Math.floor(p.x / cell);
+    const cy = Math.floor(p.y / cell);
+
+    for (const [ox, oy] of offsets) {
+      const bucket = buckets.get(`${cx + ox},${cy + oy}`);
+      if (!bucket) continue;
+
+      for (const j of bucket) {
+        if (j <= i) continue;
+        const q = particles[j];
+        const dx = p.x - q.x;
+        const dy = p.y - q.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist >= maxDist) continue;
+
+        pCtx.beginPath();
+        pCtx.moveTo(p.x, p.y);
+        pCtx.lineTo(q.x, q.y);
+        pCtx.strokeStyle = `hsla(${p.hue}, 100%, 70%, ${0.05 * (1 - dist / maxDist) * p.life})`;
+        pCtx.lineWidth = 0.5;
+        pCtx.stroke();
+      }
+    }
+  }
+}
+
+function updateParticles(energy) {
+  if (AppState.reducedMotion) return;
+
+  const speedMult = 1 + energy * 3;
   pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
 
   AppState.particles.forEach((p, i) => {
-    p.x  += p.vx * speedMult;
-    p.y  += p.vy * speedMult;
+    p.x += p.vx * speedMult;
+    p.y += p.vy * speedMult;
     p.life -= CONFIG.particles.lifeDecay * speedMult;
 
     if (p.life <= 0 || p.x < 0 || p.x > pCanvas.width || p.y < 0 || p.y > pCanvas.height) {
@@ -471,23 +659,9 @@ function updateParticles(energy) {
     pCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
     pCtx.fillStyle = `hsla(${p.hue}, 100%, 70%, ${p.alpha * p.life})`;
     pCtx.fill();
-
-    // Connect nearby particles with faint lines
-    for (let j = i + 1; j < AppState.particles.length; j++) {
-      const q = AppState.particles[j];
-      const dx = p.x - q.x;
-      const dy = p.y - q.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < CONFIG.particles.connectionDistance) {
-        pCtx.beginPath();
-        pCtx.moveTo(p.x, p.y);
-        pCtx.lineTo(q.x, q.y);
-        pCtx.strokeStyle = `hsla(${p.hue}, 100%, 70%, ${0.05 * (1 - dist / CONFIG.particles.connectionDistance) * p.life})`;
-        pCtx.lineWidth = 0.5;
-        pCtx.stroke();
-      }
-    }
   });
+
+  drawParticleConnections(AppState.particles, CONFIG.particles.connectionDistance);
 
   // Beat burst: spawn extra particles on loud energy OR strong percussive onset
   if (energy > CONFIG.particles.burstEnergyThreshold || AppState.onset > 0.6) {
@@ -560,7 +734,7 @@ function drawCharacter() {
     const drawH = drawW / mediaAspect;
 
     // Shadow / glow
-    ctx.shadowColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
+    ctx.shadowColor = getAccentColor();
     ctx.shadowBlur  = CONFIG.character.shadowBase + energy * CONFIG.character.shadowEnergy;
 
     ctx.drawImage(media, -drawW / 2, -drawH / 2, drawW, drawH);
@@ -584,7 +758,7 @@ function drawCharacter() {
  * Draw an animated SVG-like placeholder when no image is loaded.
  */
 function drawPlaceholderCharacter(ctx, w, h, energy) {
-  const glow = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
+  const glow = getAccentColor();
   const t     = Date.now() / 1000;
   const bob   = Math.sin(t * 1.5) * 4 * (1 + energy * 2);
   const pulse = 0.9 + Math.sin(t * 2) * 0.05 + energy * 0.1;
@@ -629,7 +803,7 @@ function drawPlaceholderCharacter(ctx, w, h, energy) {
   ctx.fill();
   ctx.restore();
 
-  // Mouth — animated when Souler is speaking via TTS
+  // Mouth — animated when Soul-AI is speaking via TTS
   const mouthY = cy - sz * 0.205;
   if (AppState.isSpeaking) {
     const open = (Math.sin(AppState.anim.speakingPhase * 1.75) * 0.5 + 0.5) * 0.065 + 0.012;
@@ -710,11 +884,351 @@ function drawPlaceholderCharacter(ctx, w, h, energy) {
 /**
  * Load character media (image or MP4) from a local Blob/File into the character slot.
  */
+async function persistCharacterMedia() {
+  try {
+    if (AppState.characterMediaType === 'image' && AppState.characterImageDataURL) {
+      await saveCharacter({ mediaType: 'image', dataUrl: AppState.characterImageDataURL });
+      return;
+    }
+    if (AppState.characterMediaType === 'video' && AppState.characterObjectURL) {
+      const res = await fetch(AppState.characterObjectURL);
+      const blob = await res.blob();
+      const blobKey = `char-video-${createPlaylistItemId()}`;
+      const existing = await loadCharacter();
+      if (existing?.blobKey && existing.blobKey !== blobKey) {
+        await deleteBlob(existing.blobKey).catch(() => {});
+      }
+      await saveBlob(blobKey, blob);
+      await saveCharacter({
+        mediaType: 'video',
+        blobKey,
+        mimeType: blob.type || 'video/mp4',
+      });
+    }
+  } catch (e) {
+    console.warn('Character persist error:', e);
+  }
+}
+
+function schedulePersistSession() {
+  clearTimeout(AppState._persistSessionTimer);
+  AppState._persistSessionTimer = setTimeout(() => {
+    persistSession().catch((e) => console.warn('Session persist error:', e));
+  }, 400);
+}
+
+async function persistSession() {
+  await saveSession({
+    playlist: AppState.playlist,
+    currentIndex: AppState.playlistIndex,
+    lastUrl: UI.urlInput?.value?.trim() || '',
+  });
+}
+
+function playlistHasItem(item) {
+  return AppState.playlist.some((p) => {
+    if (item.source === 'url' && p.source === 'url') return p.url === item.url;
+    if (item.source === 'file' && p.source === 'file') {
+      return p.blobKey === item.blobKey || (p.title === item.title && !item.blobKey);
+    }
+    return false;
+  });
+}
+
+async function addFileToPlaylist(file, { silent = false } = {}) {
+  const blobKey = `track-${createPlaylistItemId()}`;
+  await saveBlob(blobKey, file);
+  const item = normalizePlaylistItem({
+    source: 'file',
+    title: file.name,
+    blobKey,
+    mimeType: file.type,
+  });
+  if (!item) return null;
+  if (playlistHasItem(item)) {
+    if (!silent) showToast(t('toast.playlistExists', { name: file.name }), 'info');
+    return AppState.playlist.find((p) => p.source === 'file' && p.title === file.name) || null;
+  }
+  AppState.playlist.push(item);
+  if (!silent) showToast(t('toast.playlistAdded', { name: file.name }), 'success');
+  schedulePersistSession();
+  renderPlaylist();
+  return item;
+}
+
+async function addUrlToPlaylist(url, { silent = false } = {}) {
+  const trimmed = url?.trim();
+  if (!trimmed) return null;
+  const item = normalizePlaylistItem({
+    source: 'url',
+    url: trimmed,
+    title: playlistTitleFromUrl(trimmed),
+  });
+  if (!item) return null;
+  if (playlistHasItem(item)) {
+    if (!silent) showToast(t('toast.playlistExists', { name: item.title }), 'info');
+    return AppState.playlist.find((p) => p.source === 'url' && p.url === trimmed) || null;
+  }
+  AppState.playlist.push(item);
+  if (!silent) showToast(t('toast.playlistAdded', { name: item.title }), 'success');
+  schedulePersistSession();
+  renderPlaylist();
+  return item;
+}
+
+async function addCurrentOrUrlToPlaylist() {
+  const url = UI.urlInput?.value?.trim();
+  if (url) {
+    const item = await addUrlToPlaylist(url);
+    if (item) {
+      AppState.playlistIndex = AppState.playlist.findIndex((p) => p.id === item.id);
+      renderPlaylist();
+      schedulePersistSession();
+    }
+    return;
+  }
+
+  const title = UI.trackInfo?.textContent?.trim();
+  const hasTrack = AppState.audioElement?.src && title && title !== t('player.noTrack');
+  if (!hasTrack) {
+    showToast(t('toast.playlistNothingToAdd'), 'info');
+    return;
+  }
+
+  if (AppState.lastAudioSource === 'url') {
+    const item = await addUrlToPlaylist(AppState.audioElement.src);
+    if (item) {
+      AppState.playlistIndex = AppState.playlist.findIndex((p) => p.id === item.id);
+      renderPlaylist();
+      schedulePersistSession();
+    }
+    return;
+  }
+
+  try {
+    const res = await fetch(AppState.audioElement.src);
+    const blob = await res.blob();
+    const file = new File([blob], title, { type: blob.type || 'audio/mpeg' });
+    const item = await addFileToPlaylist(file);
+    if (item) {
+      AppState.playlistIndex = AppState.playlist.findIndex((p) => p.id === item.id);
+      renderPlaylist();
+      schedulePersistSession();
+    }
+  } catch (e) {
+    console.warn('Playlist add from current track failed:', e);
+    showToast(t('toast.playlistNothingToAdd'), 'info');
+  }
+}
+
+function renderPlaylist() {
+  const list = UI.playlistList;
+  if (!list) return;
+
+  list.innerHTML = '';
+  const total = AppState.playlist.length;
+  const current = AppState.playlistIndex;
+  if (UI.playlistCount) {
+    UI.playlistCount.textContent = total
+      ? `${current >= 0 ? current + 1 : 0}/${total}`
+      : '0/0';
+  }
+
+  if (!total) {
+    const empty = document.createElement('li');
+    empty.className = 'playlist-empty';
+    empty.textContent = t('player.playlistEmpty');
+    list.appendChild(empty);
+    return;
+  }
+
+  AppState.playlist.forEach((item, index) => {
+    const li = document.createElement('li');
+    li.className = 'playlist-item' + (index === current ? ' active' : '');
+    li.dataset.index = String(index);
+
+    const title = document.createElement('span');
+    title.className = 'playlist-item-title';
+    title.textContent = playlistDisplayTitle(item);
+    title.title = playlistDisplayTitle(item);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'playlist-item-remove';
+    remove.setAttribute('aria-label', t('player.removeTrack'));
+    remove.textContent = '×';
+
+    li.appendChild(title);
+    li.appendChild(remove);
+    list.appendChild(li);
+  });
+}
+
+function togglePlaylistPanel() {
+  if (!UI.playlistPanel) return;
+  AppState.playlistPanelOpen = !AppState.playlistPanelOpen;
+  UI.playlistPanel.classList.toggle('hidden', !AppState.playlistPanelOpen);
+}
+
+async function playPlaylistIndex(index, { autoplay = true, silent = false } = {}) {
+  if (!AppState.playlist.length) return false;
+  const safeIndex = clampPlaylistIndex(index, AppState.playlist.length);
+  const item = AppState.playlist[safeIndex];
+  if (!item) return false;
+
+  AppState.playlistIndex = safeIndex;
+  renderPlaylist();
+  schedulePersistSession();
+
+  if (item.source === 'url') {
+    loadAudioURL(item.url, { silent, skipPlaylist: true });
+    if (autoplay) playAudio();
+    return true;
+  }
+
+  const blob = await loadBlob(item.blobKey);
+  if (!blob) {
+    if (!silent) showToast(t('toast.trackRestoreFailed'), 'error');
+    return false;
+  }
+  const file = new File([blob], item.title, { type: item.mimeType || blob.type || 'audio/mpeg' });
+  loadAudioFile(file, { silent, skipPlaylist: true });
+  if (autoplay) playAudio();
+  return true;
+}
+
+async function playNextTrack({ autoplay = true } = {}) {
+  if (!AppState.playlist.length) return false;
+  const next = adjacentPlaylistIndex(AppState.playlistIndex, AppState.playlist.length, 1);
+  return playPlaylistIndex(next, { autoplay, silent: true });
+}
+
+async function playPrevTrack({ autoplay = true } = {}) {
+  if (!AppState.playlist.length) return false;
+  const prev = adjacentPlaylistIndex(AppState.playlistIndex, AppState.playlist.length, -1);
+  return playPlaylistIndex(prev, { autoplay, silent: true });
+}
+
+async function removePlaylistItemAt(index) {
+  const item = AppState.playlist[index];
+  if (!item) return;
+  if (item.source === 'file' && item.blobKey) {
+    await deleteBlob(item.blobKey).catch(() => {});
+  }
+  AppState.playlist.splice(index, 1);
+  if (!AppState.playlist.length) {
+    AppState.playlistIndex = -1;
+  } else if (AppState.playlistIndex === index) {
+    AppState.playlistIndex = Math.min(index, AppState.playlist.length - 1);
+  } else if (AppState.playlistIndex > index) {
+    AppState.playlistIndex -= 1;
+  }
+  renderPlaylist();
+  schedulePersistSession();
+  showToast(t('toast.playlistRemoved'), 'info');
+}
+
+async function clearPlaylist() {
+  for (const item of AppState.playlist) {
+    if (item.source === 'file' && item.blobKey) {
+      await deleteBlob(item.blobKey).catch(() => {});
+    }
+  }
+  AppState.playlist = [];
+  AppState.playlistIndex = -1;
+  renderPlaylist();
+  schedulePersistSession();
+  showToast(t('toast.playlistCleared'), 'info');
+}
+
+async function ensureLoadedTrackInPlaylist(file) {
+  const existingIdx = AppState.playlist.findIndex(
+    (p) => p.source === 'file' && p.title === file.name,
+  );
+  if (existingIdx >= 0) {
+    AppState.playlistIndex = existingIdx;
+    renderPlaylist();
+    schedulePersistSession();
+    return;
+  }
+  const item = await addFileToPlaylist(file, { silent: true });
+  if (item) {
+    AppState.playlistIndex = AppState.playlist.findIndex((p) => p.id === item.id);
+    renderPlaylist();
+    schedulePersistSession();
+  }
+}
+
+async function ensureLoadedUrlInPlaylist(url) {
+  const existingIdx = AppState.playlist.findIndex(
+    (p) => p.source === 'url' && p.url === url,
+  );
+  if (existingIdx >= 0) {
+    AppState.playlistIndex = existingIdx;
+    renderPlaylist();
+    schedulePersistSession();
+    return;
+  }
+  const item = await addUrlToPlaylist(url, { silent: true });
+  if (item) {
+    AppState.playlistIndex = AppState.playlist.findIndex((p) => p.id === item.id);
+    renderPlaylist();
+    schedulePersistSession();
+  }
+}
+
+async function restorePersistedSession() {
+  let restored = false;
+
+  try {
+    const char = await loadCharacter();
+    if (char?.mediaType === 'image' && char.dataUrl) {
+      const res = await fetch(char.dataUrl);
+      const blob = await res.blob();
+      loadCharacterImage(blob, { isVideo: false, silent: true });
+      restored = true;
+    } else if (char?.mediaType === 'video' && char.blobKey) {
+      const blob = await loadBlob(char.blobKey);
+      if (blob) {
+        loadCharacterImage(blob, { isVideo: true, silent: true });
+        restored = true;
+      }
+    }
+  } catch (e) {
+    console.warn('Character restore error:', e);
+  }
+
+  try {
+    const session = await loadSession();
+    if (session?.lastUrl && UI.urlInput) {
+      UI.urlInput.value = session.lastUrl;
+    }
+    if (session?.playlist?.length) {
+      AppState.playlist = session.playlist.map(normalizePlaylistItem).filter(Boolean);
+      AppState.playlistIndex = clampPlaylistIndex(
+        session.currentIndex ?? -1,
+        AppState.playlist.length,
+      );
+      renderPlaylist();
+      if (AppState.playlistIndex >= 0) {
+        await playPlaylistIndex(AppState.playlistIndex, { autoplay: false, silent: true });
+      }
+      restored = true;
+    }
+  } catch (e) {
+    console.warn('Session restore error:', e);
+  }
+
+  if (restored) {
+    setTimeout(() => showToast(t('toast.sessionRestored'), 'success'), 1400);
+  }
+}
+
 function loadCharacterImage(fileOrBlob, options = {}) {
-  const { isVideo = false } = options;
+  const { isVideo = false, silent = false } = options;
   if (!(fileOrBlob instanceof Blob)) {
     AppState._pendingCharacterUploadType = null;
-    showToast('Invalid character file', 'error');
+    showToast(t('toast.invalidCharFile'), 'error');
     return;
   }
 
@@ -750,22 +1264,24 @@ function loadCharacterImage(fileOrBlob, options = {}) {
 
     document.getElementById('upload-overlay').style.display = 'none';
 
-    // Context-aware success message
-    if (AppState._pendingCharacterUploadType === 'gif') {
-      showToast('GIF loaded — first frame only (no animation)', 'info');
-    } else if (AppState._pendingCharacterUploadType === 'mp4' || isVideo) {
-      showToast('MP4 loaded — loop animation enabled', 'success');
-    } else {
-      showToast('Character loaded!', 'success');
+    if (!silent) {
+      if (AppState._pendingCharacterUploadType === 'gif') {
+        showToast(t('toast.gifLoaded'), 'info');
+      } else if (AppState._pendingCharacterUploadType === 'mp4' || isVideo) {
+        showToast(t('toast.mp4Loaded'), 'success');
+      } else {
+        showToast(t('toast.charLoaded'), 'success');
+      }
     }
     AppState._pendingCharacterUploadType = null;
+    persistCharacterMedia().catch((e) => console.warn('Character persist error:', e));
     triggerFlash();
   };
 
   media.onerror = () => {
     URL.revokeObjectURL(objectURL);
     AppState._pendingCharacterUploadType = null;
-    showToast(isVideo ? 'Failed to load MP4 character' : 'Failed to load image', 'error');
+    showToast(isVideo ? t('toast.mp4LoadFailed') : t('toast.imageLoadFailed'), 'error');
   };
 
   if (isVideo) {
@@ -809,9 +1325,9 @@ function connectPlayerToAnalyser() {
       // This is almost always a CORS / tainted media element error
       console.warn('Web Audio connection failed (likely CORS):', err);
       if (AppState.lastAudioSource === 'url') {
-        showToast('Beat detection disabled — URL blocked by CORS. Local files work perfectly.', 'info');
+        showToast(t('toast.corsBeatDisabled'), 'info');
       } else {
-        showToast('Audio analysis unavailable for this source.', 'info');
+        showToast(t('toast.audioAnalysisUnavailable'), 'info');
       }
       // Playback still works, just no reactive visuals / beat sync
     }
@@ -921,6 +1437,10 @@ function setupAudioPlayer() {
     AppState.isPlaying = false;
     updatePlayPauseIcon();
     resetAudioAnalysis();
+    if (AppState.playlist.length > 1) {
+      playNextTrack({ autoplay: true }).catch((e) => console.warn('Auto-advance failed:', e));
+      return;
+    }
     if (!AppState.isMicListening) setMode('idle');
   });
 
@@ -963,7 +1483,7 @@ function playAudio() {
   initAudioContext();
   connectPlayerToAnalyser();
   AppState.audioElement.play().catch(err => {
-    showToast('Playback blocked — tap play again', 'info');
+    showToast(t('toast.playbackBlocked'), 'info');
   });
 }
 
@@ -984,23 +1504,51 @@ function resetAudioAnalysis() {
   AppState.beatEnergy = 0;
 }
 
-function loadAudioFile(file) {
-  const url = URL.createObjectURL(file);
-  AppState.audioElement.src = url;
-  AppState.audioElement.load();
-  AppState.lastAudioSource = 'file';
-  UI.trackInfo.textContent = file.name;
-  showToast('Track loaded: ' + file.name, 'info');
+function revokeAudioObjectURL() {
+  if (AppState.audioObjectURL) {
+    URL.revokeObjectURL(AppState.audioObjectURL);
+    AppState.audioObjectURL = null;
+  }
 }
 
-function loadAudioURL(url) {
-  if (!url) return;
+function prepareAudioElementForSource(sourceType) {
+  revokeAudioObjectURL();
+  resetAudioAnalysis();
+  AppState.audioElement.crossOrigin = sourceType === 'url' ? 'anonymous' : null;
+  AppState.lastAudioSource = sourceType;
+}
+
+function loadAudioFile(file, options = {}) {
+  const { silent = false, skipPlaylist = false } = options;
+  prepareAudioElementForSource('file');
+  const url = URL.createObjectURL(file);
+  AppState.audioObjectURL = url;
   AppState.audioElement.src = url;
   AppState.audioElement.load();
-  AppState.lastAudioSource = 'url';
-  const shortName = url.split('/').pop().split('?')[0] || 'URL track';
+  UI.trackInfo.textContent = file.name;
+  if (!silent) showToast(t('toast.trackLoaded', { name: file.name }), 'info');
+  if (!skipPlaylist) {
+    ensureLoadedTrackInPlaylist(file).catch((e) => console.warn('Playlist sync failed:', e));
+  } else {
+    schedulePersistSession();
+  }
+}
+
+function loadAudioURL(url, options = {}) {
+  const { silent = false, skipPlaylist = false } = options;
+  if (!url) return;
+  prepareAudioElementForSource('url');
+  AppState.audioElement.src = url;
+  AppState.audioElement.load();
+  const shortName = playlistTitleFromUrl(url);
   UI.trackInfo.textContent = shortName;
-  showToast('Loading URL track…', 'info');
+  if (UI.urlInput) UI.urlInput.value = url;
+  if (!silent) showToast(t('toast.loadingUrl'), 'info');
+  if (!skipPlaylist) {
+    ensureLoadedUrlInPlaylist(url).catch((e) => console.warn('Playlist sync failed:', e));
+  } else {
+    schedulePersistSession();
+  }
 }
 
 function updatePlayPauseIcon() {
@@ -1020,35 +1568,70 @@ async function toggleEnvMic() {
   }
 }
 
+function readMicLevels(data) {
+  const skip = Math.max(1, Math.floor(data.length * CONFIG.mic.humBinSkipRatio));
+  const bassEnd = Math.floor(data.length * CONFIG.mic.bassBinEndRatio);
+  let totalSum = 0;
+  let bassSum = 0;
+  for (let i = 0; i < data.length; i++) totalSum += data[i];
+  for (let i = skip; i < bassEnd; i++) bassSum += data[i];
+  const totalAvg = totalSum / (data.length * 255);
+  const bassAvg = bassSum / (Math.max(1, bassEnd - skip) * 255);
+  return { totalAvg, bassAvg };
+}
+
+function computeMicEnergy() {
+  if (!AppState.micAnalyser) return 0;
+  const data = new Uint8Array(AppState.micAnalyser.frequencyBinCount);
+  AppState.micAnalyser.getByteFrequencyData(data);
+  const { bassAvg } = readMicLevels(data);
+  return Math.min(bassAvg / CONFIG.beat.envMicCap, 1);
+}
+
 async function startEnvMic() {
   try {
     initAudioContext();
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: CONFIG.mic.constraints,
+      video: false,
+    });
     AppState.micStream = stream;
     AppState.micSource = AppState.audioContext.createMediaStreamSource(stream);
 
-    // Create a separate analyser for mic to avoid mixing with player
+    const micHighpass = AppState.audioContext.createBiquadFilter();
+    micHighpass.type = 'highpass';
+    micHighpass.frequency.value = CONFIG.mic.highpassHz;
+    micHighpass.Q.value = 0.7;
+    AppState.micHighpass = micHighpass;
+
     const micAnalyser = AppState.audioContext.createAnalyser();
     micAnalyser.fftSize = CONFIG.audio.fftSize;
     micAnalyser.smoothingTimeConstant = CONFIG.audio.micSmoothing;
-    AppState.micSource.connect(micAnalyser);
+    AppState.micSource.connect(micHighpass);
+    micHighpass.connect(micAnalyser);
 
-    // Store mic analyser; we'll use it in the animation loop
     AppState.micAnalyser = micAnalyser;
 
     AppState.isMicListening = true;
     AppState.micConfirmCount = 0;
     UI.btnMic.classList.add('active');
-    UI.micLabel.textContent = 'MIC ON';
-    showToast('Environmental mic active', 'info');
+    UI.micLabel.textContent = t('controls.micOn');
+    showToast(t('toast.micActive'), 'info');
 
     // Resume context
     if (AppState.audioContext.state === 'suspended') {
       AppState.audioContext.resume();
     }
   } catch (err) {
-    console.error('Mic error:', err);
-    showPermissionOverlay('microphone');
+    console.warn('Mic error:', err);
+    if (err?.name === 'NotFoundError') {
+      showToast(t('toast.micNotFound'), 'error');
+    } else if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+      showToast(t('toast.micDenied'), 'error');
+      showPermissionOverlay('microphone');
+    } else {
+      showToast(t('toast.micUnavailable', { error: err?.message || err?.name || 'unknown' }), 'error');
+    }
   }
 }
 
@@ -1061,16 +1644,20 @@ function stopEnvMic() {
     AppState.micSource.disconnect();
     AppState.micSource = null;
   }
+  if (AppState.micHighpass) {
+    AppState.micHighpass.disconnect();
+    AppState.micHighpass = null;
+  }
   AppState.micAnalyser = null;
   AppState.isMicListening = false;
   AppState.envMusicDetected = false;
   AppState.micEnergy = 0;
   AppState.micConfirmCount = 0;
   UI.btnMic.classList.remove('active');
-  UI.micLabel.textContent = 'MIC';
+  UI.micLabel.textContent = t('controls.mic');
   if (UI.micLevelMeter) UI.micLevelMeter.classList.add('hidden');
   if (!AppState.isPlaying) setMode('idle');
-  showToast('Microphone off', 'info');
+  showToast(t('toast.micOff'), 'info');
 }
 
 /**
@@ -1081,41 +1668,27 @@ function checkEnvMic() {
 
   const data = new Uint8Array(AppState.micAnalyser.frequencyBinCount);
   AppState.micAnalyser.getByteFrequencyData(data);
+  const { totalAvg, bassAvg } = readMicLevels(data);
+  AppState.micEnergy = totalAvg;
 
-  // Overall energy for the UI meter
-  let sum = 0;
-  for (let i = 0; i < data.length; i++) sum += data[i];
-  const avg = sum / (data.length * 255);
-  AppState.micEnergy = avg;
-
-  // Update the live level meter in the UI
-  updateMicLevelMeter(avg);
-
-  // Smarter music detection:
-  // - Slightly bass-weighted (first 35% of spectrum)
-  // - Requires sustained activity (hysteresis) to avoid speech/false triggers
-  const focusBins = Math.floor(data.length * 0.35);
-  let bassSum = 0;
-  for (let i = 0; i < focusBins; i++) bassSum += data[i];
-  const bassAvg = bassSum / (focusBins * 255);
+  updateMicLevelMeter(totalAvg);
 
   const threshold = AppState.beatThreshold * CONFIG.beat.envMicFactor;
-
-  const isAbove = bassAvg > threshold * 0.85; // a bit more forgiving on bass
+  const isAbove = bassAvg > threshold;
 
   if (isAbove) {
-    AppState.micConfirmCount = Math.min(AppState.micConfirmCount + 1, 30);
+    AppState.micConfirmCount = Math.min(AppState.micConfirmCount + 1, 40);
   } else {
-    AppState.micConfirmCount = Math.max(AppState.micConfirmCount - 2, 0); // decay faster when quiet
+    AppState.micConfirmCount = Math.max(AppState.micConfirmCount - 2, 0);
   }
 
-  const confirmedMusic = AppState.micConfirmCount > 12; // ~200ms sustained
+  const confirmedMusic = AppState.micConfirmCount > CONFIG.mic.confirmFrames;
 
   if (confirmedMusic) {
     if (!AppState.envMusicDetected) {
       AppState.envMusicDetected = true;
       setMode('music');
-      showToast('Music detected!', 'info');
+      showToast(t('toast.musicDetected'), 'info');
     }
     if (!AppState.isPlaying) {
       // Feed the character animation from the mic
@@ -1154,6 +1727,126 @@ function updateMicLevelMeter(energy) {
 
 let recognition = null;
 let recognitionChatMode = false;
+let voiceUnlockTimer = null;
+let voiceInputLocked = false;
+let voiceCommandCooldownUntil = 0;
+let lastVoiceTranscript = '';
+let lastVoiceTranscriptAt = 0;
+const recentSpokenPhrases = [];
+
+function applyRecognitionConfig() {
+  if (!recognition) return;
+  recognition.continuous = Boolean(AppState.settings.voiceAlwaysOn) && !recognitionChatMode;
+  recognition.interimResults = false;
+  recognition.lang = speechRecognitionLang();
+}
+
+function updateVoiceButtonState() {
+  const label = document.getElementById('voice-label');
+  if (!label || !UI.btnVoice) return;
+  const on = Boolean(AppState.settings.voiceAlwaysOn);
+  label.textContent = on ? t('controls.voiceOn') : t('controls.voice');
+  UI.btnVoice.classList.toggle('always-on', on);
+  if (!on && !AppState.isVoiceListening) {
+    UI.btnVoice.classList.remove('listening');
+  }
+}
+
+function clearVoiceUnlockTimer() {
+  if (voiceUnlockTimer) {
+    clearTimeout(voiceUnlockTimer);
+    voiceUnlockTimer = null;
+  }
+}
+
+function rememberSpokenPhrase(text) {
+  const normalized = String(text || '').toLowerCase().replace(/[''´`]/g, '').replace(/[.!?,…]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!normalized) return;
+  recentSpokenPhrases.push(normalized);
+  if (recentSpokenPhrases.length > 10) recentSpokenPhrases.shift();
+}
+
+function abortVoiceRecognition() {
+  if (!recognition) return;
+  try {
+    recognition.abort();
+  } catch (_) {
+    try { recognition.stop(); } catch (_) { /* already stopped */ }
+  }
+  AppState.isVoiceListening = false;
+}
+
+function lockVoiceInput() {
+  voiceInputLocked = true;
+  clearVoiceUnlockTimer();
+  abortVoiceRecognition();
+}
+
+function isVoiceInputBlocked() {
+  return voiceInputLocked || AppState.isSpeaking || AppState.chatInFlight;
+}
+
+function scheduleVoiceUnlock(delayMs = CONFIG.ui.voiceNoTtsUnlockMs) {
+  if (!AppState.settings.voiceAlwaysOn || recognitionChatMode) {
+    voiceInputLocked = false;
+    return;
+  }
+  clearVoiceUnlockTimer();
+  voiceCommandCooldownUntil = Date.now() + delayMs + CONFIG.ui.voiceCommandCooldownMs;
+  voiceUnlockTimer = setTimeout(() => {
+    if (AppState.isSpeaking || AppState.chatInFlight) {
+      scheduleVoiceUnlock(CONFIG.ui.voicePostTtsUnlockMs);
+      return;
+    }
+    voiceInputLocked = false;
+    if (AppState.settings.voiceAlwaysOn && !AppState.isVoiceListening) {
+      startVoiceRecognition(false, { silent: true });
+    }
+  }, delayMs);
+}
+
+function isDuplicateVoiceTranscript(transcript) {
+  const now = Date.now();
+  if (
+    transcript === lastVoiceTranscript
+    && now - lastVoiceTranscriptAt < CONFIG.ui.voiceTranscriptDedupeMs
+  ) {
+    return true;
+  }
+  lastVoiceTranscript = transcript;
+  lastVoiceTranscriptAt = now;
+  return false;
+}
+
+function setVoiceAlwaysOn(enabled, { persist = true, announce = true } = {}) {
+  AppState.settings.voiceAlwaysOn = Boolean(enabled);
+  if (UI.settingVoiceAlwaysOn) {
+    UI.settingVoiceAlwaysOn.checked = AppState.settings.voiceAlwaysOn;
+  }
+  updateVoiceButtonState();
+  applyRecognitionConfig();
+
+  if (AppState.settings.voiceAlwaysOn) {
+    startVoiceRecognition(false, { silent: !announce });
+    if (announce) showToast(t('toast.voiceAlwaysOn'), 'info');
+  } else {
+    clearVoiceUnlockTimer();
+    voiceInputLocked = false;
+    voiceCommandCooldownUntil = 0;
+    lastVoiceTranscript = '';
+    lastVoiceTranscriptAt = 0;
+    if (recognition && AppState.isVoiceListening) {
+      abortVoiceRecognition();
+    }
+    if (announce) showToast(t('toast.voiceAlwaysOff'), 'info');
+  }
+
+  if (persist) persistSettings({ showSavedToast: false });
+}
+
+function toggleVoiceAlwaysOn() {
+  setVoiceAlwaysOn(!AppState.settings.voiceAlwaysOn);
+}
 
 function initSpeechRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1162,58 +1855,110 @@ function initSpeechRecognition() {
     return;
   }
   recognition = new SR();
-  recognition.continuous = false;
-  recognition.interimResults = false;
-  recognition.lang = 'en-US';
   recognition.maxAlternatives = 3;
+  applyRecognitionConfig();
 
   recognition.onstart = () => {
     AppState.isVoiceListening = true;
     UI.btnVoice.classList.add('listening');
-    showVoiceFeedback('Listening…');
+    if (AppState.settings.voiceAlwaysOn && !recognitionChatMode) {
+      showVoiceFeedback(t('voice.alwaysOn'));
+    } else {
+      showVoiceFeedback(t('voice.listening'));
+    }
   };
 
   recognition.onend = () => {
     AppState.isVoiceListening = false;
+    if (recognitionChatMode) {
+      recognitionChatMode = false;
+      applyRecognitionConfig();
+    }
+    if (AppState.settings.voiceAlwaysOn) {
+      updateVoiceButtonState();
+      if (!voiceInputLocked && !AppState.isSpeaking && !AppState.chatInFlight) {
+        scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
+      }
+      return;
+    }
     UI.btnVoice.classList.remove('listening');
     hideVoiceFeedback();
   };
 
   recognition.onerror = (e) => {
     AppState.isVoiceListening = false;
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      setVoiceAlwaysOn(false, { persist: true, announce: false });
+      showToast(t('toast.micDenied'), 'error');
+      UI.btnVoice.classList.remove('listening');
+      hideVoiceFeedback();
+      return;
+    }
+    if (e.error === 'no-speech' && AppState.settings.voiceAlwaysOn) {
+      if (!voiceInputLocked && !AppState.isSpeaking) {
+        scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
+      }
+      return;
+    }
+    if (AppState.settings.voiceAlwaysOn && e.error !== 'aborted') {
+      if (!voiceInputLocked && !AppState.isSpeaking) {
+        scheduleVoiceUnlock(800);
+      }
+      return;
+    }
     UI.btnVoice.classList.remove('listening');
     hideVoiceFeedback();
-    if (e.error !== 'no-speech') {
-      showToast('Voice error: ' + e.error, 'error');
+    if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      showToast(t('toast.voiceError', { error: e.error }), 'error');
     }
   };
 
   recognition.onresult = (e) => {
-    const results = Array.from(e.results[0]);
-    const transcript = results[0].transcript.trim().toLowerCase();
+    if (isVoiceInputBlocked()) return;
+    if (Date.now() < voiceCommandCooldownUntil) return;
+
+    const last = e.results[e.results.length - 1];
+    if (!last?.isFinal) return;
+
+    const transcript = last[0].transcript.trim().toLowerCase();
+    if (!transcript) return;
+    if (isLikelyVoiceEcho(transcript, recentSpokenPhrases)) return;
+    if (isDuplicateVoiceTranscript(transcript)) return;
+
+    lockVoiceInput();
+    voiceCommandCooldownUntil = Date.now() + CONFIG.ui.voiceCommandCooldownMs;
+
     showVoiceFeedback('"' + transcript + '"');
-    setTimeout(hideVoiceFeedback, 2500);
+    setTimeout(hideVoiceFeedback, CONFIG.ui.voiceFeedbackDuration);
 
     if (recognitionChatMode) {
-      // Send to AI chat
       recognitionChatMode = false;
-      sendChatMessage(transcript);
-    } else {
-      handleVoiceCommand(transcript);
+      applyRecognitionConfig();
+      void sendChatMessage(transcript, { fromVoice: true });
+      return;
+    }
+
+    const outcome = handleVoiceCommand(transcript);
+    if (!outcome.spoke && !outcome.expectTts) {
+      scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
     }
   };
 }
 
-function startVoiceRecognition(chatMode = false) {
+function startVoiceRecognition(chatMode = false, { silent = false } = {}) {
   if (!recognition) {
-    showToast('Voice recognition not supported in this browser', 'error');
+    if (!silent) showToast(t('toast.voiceUnsupported'), 'error');
     return;
   }
   recognitionChatMode = chatMode;
+  applyRecognitionConfig();
   try {
     recognition.start();
   } catch (e) {
-    console.warn('Recognition already running:', e);
+    if (!silent) console.warn('Recognition already running:', e);
+    if (AppState.settings.voiceAlwaysOn && !chatMode && !voiceInputLocked) {
+      scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
+    }
   }
 }
 
@@ -1222,51 +1967,71 @@ function startVoiceRecognition(chatMode = false) {
  */
 function handleVoiceCommand(text) {
   const cmd = text.toLowerCase();
+  const patterns = voicePatterns();
+  const outcome = { spoke: false, expectTts: false };
 
-  if (matchCmd(cmd, ['dance', 'start dancing', 'let\'s dance'])) {
-    setMode('dance'); speak('Let\'s dance!');
-  } else if (matchCmd(cmd, ['idle', 'stop dancing', 'rest', 'chill'])) {
-    setMode('idle'); speak('Chilling out.');
-  } else if (matchCmd(cmd, ['play', 'start music', 'play music'])) {
-    playAudio(); speak('Playing music!');
-  } else if (matchCmd(cmd, ['pause', 'stop music', 'stop playing'])) {
-    pauseAudio(); speak('Paused.');
-  } else if (matchCmd(cmd, ['stop'])) {
-    stopAudio(); speak('Stopped.');
-  } else if (matchCmd(cmd, ['volume up', 'louder', 'turn it up'])) {
-    adjustVolume(0.1); speak('Volume up!');
-  } else if (matchCmd(cmd, ['volume down', 'quieter', 'turn it down'])) {
-    adjustVolume(-0.1); speak('Volume down.');
-  } else if (matchCmd(cmd, ['mute', 'silence'])) {
-    AppState.audioElement.volume = 0; AppState.settings.volume = 0; applySettings(); speak('Muted.');
-  } else if (matchCmd(cmd, ['unmute'])) {
-    AppState.settings.volume = 0.8; applySettings(); speak('Unmuted!');
-  } else if (matchCmd(cmd, ['chat', 'talk to me', 'let\'s chat', 'hey souler', 'hello souler'])) {
-    openChatPanel(); speak('What\'s up?'); setTimeout(() => startVoiceRecognition(true), 1500);
-  } else if (matchCmd(cmd, ['settings', 'open settings'])) {
-    openSettings();
-  } else if (matchCmd(cmd, ['microphone', 'start listening', 'listen'])) {
-    startEnvMic();
-  } else if (matchCmd(cmd, ['close', 'never mind', 'cancel'])) {
-    closeChatPanel(); closeSettings();
-  } else if (matchCmd(cmd, ['spin', 'rotate'])) {
-    triggerSpin();
-  } else if (matchCmd(cmd, ['flash', 'light up'])) {
-    triggerFlash();
-  } else if (matchCmd(cmd, ['shake', 'tremble'])) {
-    triggerShake();
-  } else {
-    // Unknown command — try AI chat if key is set
-    if (AppState.settings.apiKey) {
-      sendChatMessage(text);
-    } else {
-      showToast('Unknown command: "' + text + '"', 'info');
+  const say = (action) => {
+    speak(voiceReply(action));
+    outcome.spoke = true;
+  };
+
+  if (matchVoiceCommand(cmd, patterns.dance)) {
+    setMode('dance'); say('dance');
+  } else if (matchVoiceCommand(cmd, patterns.idle)) {
+    setMode('idle'); say('idle');
+  } else if (matchVoiceCommand(cmd, patterns.play)) {
+    playAudio(); say('play');
+  } else if (matchVoiceCommand(cmd, patterns.pause)) {
+    pauseAudio(); say('pause');
+  } else if (matchVoiceCommand(cmd, patterns.stop)) {
+    stopAudio(); say('stop');
+  } else if (matchVoiceCommand(cmd, patterns.nextTrack)) {
+    outcome.expectTts = true;
+    playNextTrack().then((ok) => {
+      if (ok) speak(voiceReply('nextTrack'));
+      else scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
+    });
+  } else if (matchVoiceCommand(cmd, patterns.prevTrack)) {
+    outcome.expectTts = true;
+    playPrevTrack().then((ok) => {
+      if (ok) speak(voiceReply('prevTrack'));
+      else scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
+    });
+  } else if (matchVoiceCommand(cmd, patterns.volumeUp)) {
+    adjustVolume(0.1); say('volumeUp');
+  } else if (matchVoiceCommand(cmd, patterns.volumeDown)) {
+    adjustVolume(-0.1); say('volumeDown');
+  } else if (matchVoiceCommand(cmd, patterns.mute)) {
+    AppState.audioElement.volume = 0; AppState.settings.volume = 0; applySettings(); say('mute');
+  } else if (matchVoiceCommand(cmd, patterns.unmute)) {
+    AppState.settings.volume = 0.8; applySettings(); say('unmute');
+  } else if (matchVoiceCommand(cmd, patterns.chat)) {
+    openChatPanel(); say('chat');
+    if (!AppState.settings.voiceAlwaysOn) {
+      setTimeout(() => startVoiceRecognition(true), 1500);
     }
+  } else if (matchVoiceCommand(cmd, patterns.settings)) {
+    openSettings();
+  } else if (matchVoiceCommand(cmd, patterns.mic)) {
+    startEnvMic();
+  } else if (matchVoiceCommand(cmd, patterns.close)) {
+    closeChatPanel(); closeSettings();
+  } else if (matchVoiceCommand(cmd, patterns.stopVoice)) {
+    setVoiceAlwaysOn(false);
+  } else if (matchVoiceCommand(cmd, patterns.spin)) {
+    triggerSpin();
+  } else if (matchVoiceCommand(cmd, patterns.flash)) {
+    triggerFlash();
+  } else if (matchVoiceCommand(cmd, patterns.shake)) {
+    triggerShake();
+  } else if (AppState.settings.apiKey) {
+    outcome.expectTts = true;
+    void sendChatMessage(text, { fromVoice: true });
+  } else {
+    showToast(t('toast.unknownCommand', { text }), 'info');
   }
-}
 
-function matchCmd(text, patterns) {
-  return patterns.some(p => text.includes(p));
+  return outcome;
 }
 
 function adjustVolume(delta) {
@@ -1278,12 +2043,14 @@ function adjustVolume(delta) {
    9. AI CHAT (OpenAI-compatible)
    ───────────────────────────────────────────────── */
 
-async function sendChatMessage(text) {
+async function sendChatMessage(text, { fromVoice = false } = {}) {
   if (!text.trim()) return;
+  if (AppState.chatInFlight) return;
+  if (fromVoice && AppState.settings.voiceAlwaysOn) lockVoiceInput();
 
   const apiKey  = AppState.settings.apiKey;
   if (!apiKey) {
-    showToast('Set your API key in Settings first', 'info');
+    showToast(t('toast.apiKeyRequired'), 'info');
     openSettings();
     return;
   }
@@ -1296,12 +2063,14 @@ async function sendChatMessage(text) {
   // Show typing indicator
   const typingId = addTypingIndicator();
   showChatBubbleOnCharacter('…');
+  AppState.chatInFlight = true;
 
   const messages = [
     { role: 'system', content: AppState.settings.systemPrompt },
     ...AppState.chatHistory.slice(-CONFIG.ui.aiPromptTurns), // keep last N turns for context
   ];
 
+  let spokeReply = false;
   try {
     const res = await fetch(AppState.settings.apiBase.replace(/\/$/, '') + '/chat/completions', {
       method: 'POST',
@@ -1325,19 +2094,25 @@ async function sendChatMessage(text) {
     }
 
     const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content || '(no response)';
+    const reply = data.choices?.[0]?.message?.content || t('voice.noResponse');
 
     AppState.chatHistory.push({ role: 'assistant', content: reply });
     addChatBubble('ai', reply);
     showChatBubbleOnCharacter(reply);
     speak(reply);
+    spokeReply = true;
     saveChatHistory();
   } catch (err) {
     removeTypingIndicator(typingId);
-    const errMsg = 'AI error: ' + err.message;
+    const errMsg = t('toast.aiError', { error: err.message });
     addChatBubble('ai', errMsg);
     showToast(errMsg, 'error');
     console.error(err);
+  } finally {
+    AppState.chatInFlight = false;
+    if (fromVoice && AppState.settings.voiceAlwaysOn && !spokeReply && !AppState.isSpeaking) {
+      scheduleVoiceUnlock(CONFIG.ui.voiceNoTtsUnlockMs);
+    }
   }
 }
 
@@ -1407,6 +2182,13 @@ const UI = {
   settingSensitivity:document.getElementById('setting-sensitivity'),
   settingSpeed:      document.getElementById('setting-speed'),
   settingSystemPrompt: document.getElementById('setting-system-prompt'),
+  settingRememberApiKey: document.getElementById('setting-remember-api-key'),
+  settingLanguage:     document.getElementById('setting-language'),
+  settingVoiceAlwaysOn: document.getElementById('setting-voice-always-on'),
+  settingTtsEngine:    document.getElementById('setting-tts-engine'),
+  settingTtsVoice:     document.getElementById('setting-tts-voice'),
+  settingTtsSpeed:     document.getElementById('setting-tts-speed'),
+  ttsSpeedDisplay:     document.getElementById('tts-speed-display'),
 
   volDisplay:        document.getElementById('vol-display'),
   sensDisplay:       document.getElementById('sens-display'),
@@ -1420,6 +2202,14 @@ const UI = {
   btnLoadURL:        document.getElementById('btn-load-url'),
   volumeSlider:      document.getElementById('volume-slider'),
   trackInfo:         document.getElementById('track-info'),
+  btnPlaylistPrev:   document.getElementById('btn-playlist-prev'),
+  btnPlaylistNext:   document.getElementById('btn-playlist-next'),
+  btnPlaylistToggle: document.getElementById('btn-playlist-toggle'),
+  btnPlaylistAdd:    document.getElementById('btn-playlist-add'),
+  btnPlaylistClear:  document.getElementById('btn-playlist-clear'),
+  playlistPanel:     document.getElementById('playlist-panel'),
+  playlistList:      document.getElementById('playlist-list'),
+  playlistCount:     document.getElementById('playlist-count'),
   iconPlay:          document.getElementById('icon-play'),
   iconPause:         document.getElementById('icon-pause'),
 
@@ -1442,6 +2232,7 @@ const UI = {
   presetFileInput:   document.getElementById('preset-file-input'),
 
   chatPanel:         document.getElementById('chat-panel'),
+  chatBackdrop:      document.getElementById('chat-backdrop'),
   btnCloseChat:      document.getElementById('btn-close-chat'),
   btnClearChat:      document.getElementById('btn-clear-chat'),
   chatMessages:      document.getElementById('chat-messages'),
@@ -1475,6 +2266,19 @@ function wireEvents() {
     AppState.settings.sensitivity= parseFloat(UI.settingSensitivity.value);
     AppState.settings.animSpeed  = parseFloat(UI.settingSpeed.value);
     AppState.settings.systemPrompt = UI.settingSystemPrompt.value;
+    AppState.settings.ttsEngine = UI.settingTtsEngine?.value || 'auto';
+    AppState.settings.ttsVoice = UI.settingTtsVoice?.value || DEFAULT_TTS_VOICE;
+    AppState.settings.ttsSpeed = parseFloat(UI.settingTtsSpeed?.value) || DEFAULT_TTS_SPEED;
+    if (UI.settingVoiceAlwaysOn) {
+      AppState.settings.voiceAlwaysOn = UI.settingVoiceAlwaysOn.checked;
+    }
+    if (UI.settingLanguage) {
+      AppState.settings.locale = UI.settingLanguage.value;
+      changeLocale(AppState.settings.locale);
+    }
+    if (UI.settingRememberApiKey) {
+      AppState.settings.rememberApiKey = UI.settingRememberApiKey.checked;
+    }
     saveSettings();
     closeSettings();
   });
@@ -1485,10 +2289,24 @@ function wireEvents() {
     AppState.audioElement.volume = parseFloat(UI.settingVolume.value);
   });
   UI.settingSensitivity.addEventListener('input', () => {
-    UI.sensDisplay.textContent = Math.round(UI.settingSensitivity.value * 100) + '%';
+    const sens = parseFloat(UI.settingSensitivity.value);
+    UI.sensDisplay.textContent = Math.round(sens * 100) + '%';
+    AppState.settings.sensitivity = sens;
+    AppState.beatThreshold = beatThresholdFromSensitivity(sens, CONFIG.beat);
   });
   UI.settingSpeed.addEventListener('input', () => {
     UI.speedDisplay.textContent = parseFloat(UI.settingSpeed.value).toFixed(1) + 'x';
+  });
+  UI.settingTtsSpeed?.addEventListener('input', () => {
+    if (UI.ttsSpeedDisplay) {
+      UI.ttsSpeedDisplay.textContent = parseFloat(UI.settingTtsSpeed.value).toFixed(2) + 'x';
+    }
+  });
+
+  UI.settingLanguage?.addEventListener('change', () => {
+    AppState.settings.locale = UI.settingLanguage.value;
+    changeLocale(UI.settingLanguage.value);
+    persistSettings({ showSavedToast: false });
   });
 
   // Theme swatches
@@ -1496,8 +2314,8 @@ function wireEvents() {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.theme-swatch').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      setAccentTheme(btn.dataset.theme, true);
       AppState.settings.theme = btn.dataset.theme;
+      setAccentTheme(btn.dataset.theme, true);
     });
   });
 
@@ -1523,6 +2341,40 @@ function wireEvents() {
     UI.volDisplay.textContent = Math.round(AppState.settings.volume * 100) + '%';
   });
 
+  UI.btnPlaylistAdd?.addEventListener('click', () => {
+    addCurrentOrUrlToPlaylist().catch((e) => console.warn('Add to playlist failed:', e));
+  });
+  UI.btnPlaylistPrev?.addEventListener('click', () => {
+    playPrevTrack().catch((e) => console.warn('Previous track failed:', e));
+  });
+  UI.btnPlaylistNext?.addEventListener('click', () => {
+    playNextTrack().catch((e) => console.warn('Next track failed:', e));
+  });
+  UI.btnPlaylistToggle?.addEventListener('click', togglePlaylistPanel);
+  UI.btnPlaylistClear?.addEventListener('click', () => {
+    clearPlaylist().catch((e) => console.warn('Clear playlist failed:', e));
+  });
+  UI.playlistList?.addEventListener('click', (e) => {
+    const removeBtn = e.target.closest('.playlist-item-remove');
+    if (removeBtn) {
+      e.stopPropagation();
+      const li = removeBtn.closest('.playlist-item');
+      const index = Number(li?.dataset.index);
+      if (!Number.isNaN(index)) {
+        removePlaylistItemAt(index).catch((err) => console.warn('Remove track failed:', err));
+      }
+      return;
+    }
+    const li = e.target.closest('.playlist-item');
+    if (!li || li.classList.contains('playlist-empty')) return;
+    const index = Number(li.dataset.index);
+    if (!Number.isNaN(index)) {
+      playPlaylistIndex(index, { autoplay: true, silent: true })
+        .catch((err) => console.warn('Play playlist item failed:', err));
+    }
+  });
+  UI.urlInput?.addEventListener('change', () => schedulePersistSession());
+
   // ── Character Upload ──
   UI.fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -1532,13 +2384,13 @@ function wireEvents() {
       const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
 
       if (!isImage && !isMp4) {
-        showToast('Unsupported character format. Use PNG/JPG/WEBP/GIF or MP4.', 'error');
+        showToast(t('toast.unsupportedFormat'), 'error');
         e.target.value = '';
         return;
       }
 
       if (file.size > CONFIG.character.maxUploadBytes) {
-        showToast('Character file is too large (max 25MB).', 'error');
+        showToast(t('toast.fileTooLarge'), 'error');
         e.target.value = '';
         return;
       }
@@ -1589,11 +2441,15 @@ function wireEvents() {
   });
 
   // ── Voice ──
-  UI.btnVoice.addEventListener('click', () => startVoiceRecognition(false));
+  UI.btnVoice.addEventListener('click', () => toggleVoiceAlwaysOn());
+  UI.settingVoiceAlwaysOn?.addEventListener('change', () => {
+    setVoiceAlwaysOn(UI.settingVoiceAlwaysOn.checked, { persist: true, announce: true });
+  });
 
   // ── Chat ──
   UI.btnChat.addEventListener('click', openChatPanel);
   UI.btnCloseChat.addEventListener('click', closeChatPanel);
+  UI.chatBackdrop?.addEventListener('click', closeChatPanel);
   UI.btnClearChat?.addEventListener('click', clearChatHistory);
   UI.btnSendChat.addEventListener('click', () => {
     const text = UI.chatInput.value.trim();
@@ -1627,7 +2483,7 @@ function wireEvents() {
     switch (e.code) {
       case 'Space':      e.preventDefault(); if (AppState.isPlaying) pauseAudio(); else playAudio(); break;
       case 'KeyD':       setMode(AppState.mode === 'dance' ? 'idle' : 'dance'); break;
-      case 'KeyV':       startVoiceRecognition(false); break;
+      case 'KeyV':       toggleVoiceAlwaysOn(); break;
       case 'KeyC':       openChatPanel(); break;
       case 'KeyM':       toggleEnvMic(); break;
       case 'KeyS':       openSettings(); break;
@@ -1661,10 +2517,8 @@ function closeChatPanel() {
 
 function showPermissionOverlay(type) {
   if (type === 'microphone') {
-    document.getElementById('perm-icon').textContent  = '🎤';
-    document.getElementById('perm-title').textContent = 'Microphone Access';
-    document.getElementById('perm-message').textContent =
-      'Souler needs microphone access to listen for music and voice commands.';
+    document.getElementById('perm-icon').textContent = '🎤';
+    applyTranslations();
   }
   UI.permOverlay.classList.remove('hidden');
   UI.permOverlay.classList.add('flex');
@@ -1687,14 +2541,20 @@ function animationLoop(timestamp) {
   const delta = Math.min((timestamp - lastFrame) / 1000, CONFIG.ui.animationDeltaCap); // seconds, capped
   lastFrame = timestamp;
 
-  // 1) Compute audio energy
-  let energy = 0;
-  if (AppState.isPlaying || AppState.envMusicDetected) {
-    energy = computeAudioEnergy();
-  }
-
-  // 2) Check env mic
+  // 1) Check env mic first (may set envMusicDetected + beatEnergy)
   if (AppState.isMicListening) checkEnvMic();
+
+  // 2) Compute audio energy — player OR mic, never the wrong analyser
+  let energy = 0;
+  if (AppState.isPlaying) {
+    energy = computeAudioEnergy();
+  } else if (AppState.isMicListening && AppState.envMusicDetected) {
+    energy = computeMicEnergy();
+    AppState.beatEnergy = energy;
+    AppState.onset = 0;
+  } else if (AppState.envMusicDetected) {
+    energy = AppState.beatEnergy;
+  }
 
   // 3) Update character animation targets
   updateCharacterAnimation(energy, delta);
@@ -1702,19 +2562,21 @@ function animationLoop(timestamp) {
   // 4) Draw character
   drawCharacter();
 
-  // 5) Update visualizer
-  if (AppState.isPlaying || AppState.envMusicDetected) {
+  // 5) Update visualizer (player only — mic has no bar graph)
+  if (AppState.isPlaying) {
     updateVisualizer();
   } else {
     // Fade bars to zero
-    UI.vizBars.forEach(b => { b.style.height = '2px'; });
+    AppState.vizBars.forEach(b => { b.style.height = '2px'; });
   }
 
   // 6) Update glow rings
   updateGlowRings(energy);
 
   // 7) Particle background
-  updateParticles(energy);
+  if (!AppState.reducedMotion) {
+    updateParticles(energy);
+  }
 }
 
 /**
@@ -1773,7 +2635,7 @@ function updateCharacterAnimation(energy, delta) {
         a.targetScale = 1 + pop * CONFIG.animation.music.beatScale;
         a.targetY     = -pop * CONFIG.animation.music.beatY;
         a.flashAlpha  = Math.max(a.flashAlpha, pop);
-        a.flashColor  = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
+        a.flashColor  = getAccentColor();
       } else {
         a.targetScale = 1 + Math.abs(Math.sin(a.bouncePhase)) * CONFIG.animation.music.idleScale;
         a.targetY     = -Math.abs(Math.sin(a.bouncePhase)) * CONFIG.animation.music.idleY;
@@ -1824,7 +2686,7 @@ function updateGlowRings(energy) {
   UI.glowRingInner.style.width  = inner + 'px';
   UI.glowRingInner.style.height = inner + 'px';
 
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
+  const accent = getAccentColor();
   const glowSize = CONFIG.glow.sizeBase + energy * CONFIG.glow.sizeEnergy;
   UI.glowRingOuter.style.boxShadow =
     `0 0 ${glowSize}px rgba(${hexToRgb(accent)}, ${CONFIG.glow.alphaBase + energy * CONFIG.glow.alphaEnergy}),
@@ -1839,36 +2701,155 @@ function updateGlowRings(energy) {
 function setMode(mode) {
   AppState.mode = mode;
   UI.modeBadge.dataset.mode = mode;
-  UI.modeLabel.textContent = mode.toUpperCase();
+  UI.modeLabel.textContent = modeLabel(mode);
 
   // Update toggle button
   const isDancing = mode === 'dance' || mode === 'music';
-  UI.modeToggleLabel.textContent = isDancing ? 'IDLE' : 'DANCE';
+  UI.modeToggleLabel.textContent = isDancing ? t('controls.idle') : t('controls.dance');
+}
+
+let activeTtsAudio = null;
+let activeTtsObjectUrl = null;
+let speakGeneration = 0;
+
+function stopSpeaking() {
+  speakGeneration += 1;
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  if (activeTtsAudio) {
+    activeTtsAudio.pause();
+    activeTtsAudio.src = '';
+    activeTtsAudio = null;
+  }
+  if (activeTtsObjectUrl) {
+    URL.revokeObjectURL(activeTtsObjectUrl);
+    activeTtsObjectUrl = null;
+  }
+  restoreMusicDuck();
+  AppState.isSpeaking = false;
+  AppState.anim.speakingPhase = 0;
+}
+
+let musicDuckVolume = null;
+
+function duckMusicWhileSpeaking() {
+  if (!AppState.isPlaying || musicDuckVolume !== null) return;
+  musicDuckVolume = AppState.audioElement.volume;
+  AppState.audioElement.volume = Math.max(0.08, musicDuckVolume * 0.35);
+}
+
+function restoreMusicDuck() {
+  if (musicDuckVolume === null) return;
+  AppState.audioElement.volume = musicDuckVolume;
+  musicDuckVolume = null;
+}
+
+function beginSpeakingAnimation() {
+  AppState.isSpeaking = true;
+  AppState.anim.speakingPhase = 0;
+  duckMusicWhileSpeaking();
+}
+
+function endSpeakingAnimation() {
+  AppState.isSpeaking = false;
+  AppState.anim.speakingPhase = 0;
+  restoreMusicDuck();
+  if (AppState.settings.voiceAlwaysOn) {
+    scheduleVoiceUnlock(CONFIG.ui.voicePostTtsUnlockMs);
+  } else {
+    voiceInputLocked = false;
+  }
 }
 
 function speak(text) {
-  if (!window.speechSynthesis) return;
+  const trimmed = truncateForTts(text);
+  if (!trimmed) return;
+  rememberSpokenPhrase(trimmed);
+  if (AppState.settings.voiceAlwaysOn) lockVoiceInput();
+  stopSpeaking();
+  const gen = speakGeneration;
+  void speakInternal(trimmed, gen);
+}
+
+async function speakInternal(text, gen) {
+  const engine = resolveTtsEngine(AppState.settings.ttsEngine, getLocale());
+  beginSpeakingAnimation();
+
+  if (engine === 'kokoro') {
+    const played = await playKokoroSpeech(text, gen);
+    if (played || gen !== speakGeneration) return;
+  }
+
+  if (gen === speakGeneration) {
+    playBrowserSpeech(text, gen);
+  }
+}
+
+async function playKokoroSpeech(text, gen) {
+  try {
+    const blob = await synthesizeKokoro(text, {
+      voice: AppState.settings.ttsVoice || DEFAULT_TTS_VOICE,
+      speed: AppState.settings.ttsSpeed ?? DEFAULT_TTS_SPEED,
+    });
+    if (!blob || gen !== speakGeneration) return false;
+    if (blob.type && !blob.type.startsWith('audio/')) return false;
+
+    const url = URL.createObjectURL(blob);
+    activeTtsObjectUrl = url;
+    const audio = new Audio(url);
+    activeTtsAudio = audio;
+    audio.volume = Math.min(1, (AppState.settings.volume ?? 0.8) + 0.1);
+
+    return await new Promise((resolve) => {
+      const finish = (ok) => {
+        if (gen !== speakGeneration) {
+          resolve(false);
+          return;
+        }
+        if (activeTtsObjectUrl === url) {
+          URL.revokeObjectURL(url);
+          activeTtsObjectUrl = null;
+        }
+        if (activeTtsAudio === audio) activeTtsAudio = null;
+        endSpeakingAnimation();
+        resolve(ok);
+      };
+      audio.onended = () => finish(true);
+      audio.onerror = () => finish(false);
+      audio.play().catch(() => finish(false));
+    });
+  } catch {
+    if (gen === speakGeneration) endSpeakingAnimation();
+    return false;
+  }
+}
+
+function playBrowserSpeech(text, gen) {
+  if (!window.speechSynthesis) {
+    endSpeakingAnimation();
+    return;
+  }
 
   window.speechSynthesis.cancel();
-  AppState.isSpeaking = false;
+  beginSpeakingAnimation();
 
   const utt = new SpeechSynthesisUtterance(text);
-  utt.rate   = 1.05;
-  utt.pitch  = 1.1;
+  utt.rate = 1.05;
+  utt.pitch = 1.1;
   utt.volume = 0.9;
+  utt.lang = speechSynthesisLang();
 
-  // Try to pick a nice voice
   const voices = window.speechSynthesis.getVoices();
-  const preferred = voices.find(v => v.name.includes('Google') && v.lang.startsWith('en'));
+  const langPrefix = getLocale() === 'de' ? 'de' : 'en';
+  const preferred = voices.find(v => v.lang.startsWith(langPrefix))
+    || voices.find(v => v.name.includes('Google') && v.lang.startsWith(langPrefix));
   if (preferred) utt.voice = preferred;
 
-  // Track speaking state for visual mouth animation
-  utt.onstart = () => { AppState.isSpeaking = true; };
-  utt.onend   = () => { AppState.isSpeaking = false; AppState.anim.speakingPhase = 0; };
-  utt.onerror = () => { AppState.isSpeaking = false; AppState.anim.speakingPhase = 0; };
-
-  AppState.isSpeaking = true;
-  AppState.anim.speakingPhase = 0;
+  const finish = () => {
+    if (gen !== speakGeneration) return;
+    endSpeakingAnimation();
+  };
+  utt.onend = finish;
+  utt.onerror = finish;
 
   window.speechSynthesis.speak(utt);
 }
@@ -1895,8 +2876,7 @@ function hideVoiceFeedback() {
 
 function triggerFlash() {
   AppState.anim.flashAlpha = 0.8;
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00f5ff';
-  AppState.anim.flashColor = accent;
+  AppState.anim.flashColor = getAccentColor();
 }
 
 function triggerSpin() {
@@ -1919,6 +2899,10 @@ function triggerBlink() {
   setTimeout(() => { AppState.anim.blinkOpen = 1; },   160);
 }
 
+function getAccentColor() {
+  return AppState.cachedAccentColor || '#00f5ff';
+}
+
 function setAccentTheme(theme, save = false) {
   const themes = {
     neon:   '#00f5ff',
@@ -1928,11 +2912,15 @@ function setAccentTheme(theme, save = false) {
     yellow: '#ffd700',
   };
   const color = themes[theme] || themes.neon;
+  AppState.cachedAccentColor = color;
   document.documentElement.style.setProperty('--accent', color);
   document.documentElement.style.setProperty('--accent-rgb', hexToRgb(color));
-  // Update meta theme-color
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = '#0a0a0f';
+  if (save) {
+    AppState.settings.theme = theme;
+    persistSettings({ showSavedToast: false });
+  }
 }
 
 function hexToRgb(hex) {
@@ -1940,15 +2928,6 @@ function hexToRgb(hex) {
   if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
   const num = parseInt(hex, 16);
   return `${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}`;
-}
-
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 function initVisualizerBars() {
@@ -1967,12 +2946,19 @@ function initVisualizerBars() {
    13. PWA & INITIALIZATION
    ───────────────────────────────────────────────── */
 
-function registerServiceWorker() {
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(err => {
-      // SW is optional — not a blocking error
-      console.info('SW registration skipped:', err.message);
-    });
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+
+  const swUrl = `sw.js?v=${APP_VERSION}`;
+  try {
+    const probe = await fetch(swUrl, { method: 'GET', cache: 'no-store' });
+    if (!probe.ok) return;
+    await navigator.serviceWorker.register(swUrl);
+  } catch {
+    // Self-signed HTTPS breaks SW — http://localhost:8088 works without TLS
+    if (location.protocol === 'https:' && location.hostname === 'localhost') {
+      console.info('SW skipped (untrusted cert). Use http://localhost:8088 for full PWA support.');
+    }
   }
 }
 
@@ -1983,8 +2969,14 @@ function handleResize() {
 }
 
 function init() {
+  AppState.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', (e) => {
+    AppState.reducedMotion = e.matches;
+  });
+
   // Load saved settings
   loadSettings();
+  applyTranslations();
 
   // Load persisted chat history (after settings + DOM)
   loadChatHistory();
@@ -2005,8 +2997,16 @@ function init() {
   // Wire all UI events
   wireEvents();
 
+  renderPlaylist();
+  migrateLegacyStorage()
+    .then(() => restorePersistedSession())
+    .catch((e) => console.warn('Restore session failed:', e));
+
   // Set up speech recognition
   initSpeechRecognition();
+  if (AppState.settings.voiceAlwaysOn) {
+    setVoiceAlwaysOn(true, { persist: false, announce: false });
+  }
 
   // Start animation loop
   animationLoop(0);
@@ -2027,7 +3027,11 @@ function init() {
   registerServiceWorker();
 
   // Welcome message
-  setTimeout(() => showToast('Welcome to Souler! 🎵 Tap to upload your character.', 'info'), 800);
+  setTimeout(() => showToast(t('toast.welcome'), 'info'), 800);
+
+  if (location.protocol === 'https:' && location.port === '8443' && location.hostname === 'localhost') {
+    setTimeout(() => showToast(t('toast.useHttpLocalhost'), 'info'), 2200);
+  }
 }
 
 function debounce(fn, delay) {

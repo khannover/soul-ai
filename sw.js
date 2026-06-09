@@ -1,51 +1,63 @@
 /**
- * Souler Web — Service Worker (sw.js)
- * Provides offline caching for PWA support.
+ * Soul-AI — Service Worker
+ * Network-first for app shell; cache-first for static assets.
  */
 
-const CACHE_NAME = 'souler-web-v1';
+const APP_VERSION = '2.5.0';
+const CACHE_NAME = `soul-ai-${APP_VERSION}`;
 
-// Files to cache on install
 const PRECACHE_ASSETS = [
   './',
   './index.html',
   './style.css',
+  './tailwind.css',
+  './core.mjs',
+  './i18n.mjs',
+  './tts.mjs',
+  './storage.mjs',
   './app.js',
+  './assets/fonts/share-tech-mono.ttf',
   './manifest.json',
-  './assets/placeholder-character.png',
+  './assets/icon-192.png',
+  './assets/icon-512.png',
 ];
 
-// Install: precache core assets
+const NETWORK_FIRST = new Set([
+  '/',
+  '/index.html',
+  '/app.js',
+  '/core.mjs',
+  '/i18n.mjs',
+  '/tts.mjs',
+  '/storage.mjs',
+  '/style.css',
+  '/tailwind.css',
+]);
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(PRECACHE_ASSETS).catch((err) => {
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.addAll(PRECACHE_ASSETS).catch((err) => {
         console.warn('SW precache partial failure:', err);
-      });
-    })
+      }),
+    ),
   );
   self.skipWaiting();
 });
 
-// Activate: clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
-        keys
-          .filter((key) => key !== CACHE_NAME)
-          .map((key) => caches.delete(key))
-      )
-    )
+        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)),
+      ),
+    ).then(() => self.clients.claim()),
   );
-  self.clients.claim();
 });
 
-// Fetch: cache-first for core assets, network-first for API calls
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Don't intercept API calls or cross-origin resources
   if (
     url.origin !== location.origin ||
     url.pathname.startsWith('/chat') ||
@@ -54,22 +66,44 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Cache valid responses
-        if (response && response.status === 200 && response.type === 'basic') {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      }).catch(() => {
-        // Offline fallback for navigation
-        if (event.request.mode === 'navigate') {
-          return caches.match('./index.html');
-        }
-      });
-    })
-  );
+  const path = url.pathname.replace(/\/$/, '') || '/';
+  const networkFirst = NETWORK_FIRST.has(path) || path.endsWith('/index.html');
+
+  if (networkFirst) {
+    event.respondWith(networkFirstStrategy(event.request));
+    return;
+  }
+
+  event.respondWith(cacheFirstStrategy(event.request));
 });
+
+async function networkFirstStrategy(request) {
+  try {
+    const response = await fetch(request);
+    if (response && response.status === 200 && response.type === 'basic') {
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch (err) {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+    if (request.mode === 'navigate') {
+      const fallback = await caches.match('./index.html');
+      if (fallback) return fallback;
+    }
+    throw err;
+  }
+}
+
+async function cacheFirstStrategy(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+
+  const response = await fetch(request);
+  if (response && response.status === 200 && response.type === 'basic') {
+    const cache = await caches.open(CACHE_NAME);
+    cache.put(request, response.clone());
+  }
+  return response;
+}

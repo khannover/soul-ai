@@ -1,6 +1,6 @@
-# 🎵 Souler Web — AI Live Speaker
+# 🎵 Soul-AI — AI Live Speaker
 
-> A production-ready single-page web app that mimics the **Souler AI Live Speaker** experience — powered entirely by browser technologies. Upload any character image, blast some music, and watch your companion dance, react, and chat in real time.
+> A production-ready single-page web app — your **AI Live Speaker** companion, powered entirely by browser technologies. Upload any character image, blast some music, and watch your companion dance, react, and chat in real time.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-cyan.svg)](LICENSE)
 [![PWA Ready](https://img.shields.io/badge/PWA-Ready-blueviolet)](manifest.json)
@@ -30,8 +30,8 @@
 ### Option 1 — Open directly in browser
 ```bash
 # Clone the repo
-git clone https://github.com/khannover/souler-web.git
-cd souler-web
+git clone https://github.com/khannover/soul-ai.git
+cd soul-ai
 
 # Open index.html in any modern browser
 open index.html          # macOS
@@ -56,7 +56,7 @@ Then visit **http://localhost:8080** in your browser.
 ### Option 3 — Deploy to GitHub Pages
 1. Push to your repo's `main` branch
 2. Go to **Settings → Pages → Deploy from branch → `main` → `/` (root)**
-3. Your app is live at `https://yourusername.github.io/souler-web/`
+3. Your app is live at `https://yourusername.github.io/soul-ai/`
 
 ---
 
@@ -103,7 +103,7 @@ Tap the **VOICE** button or press **V** on keyboard, then speak a command:
 | `"volume down"` / `"quieter"` | Decrease volume by 10% |
 | `"mute"` / `"silence"` | Mute audio |
 | `"unmute"` | Restore volume |
-| `"chat"` / `"hey souler"` | Open AI chat |
+| `"chat"` / `"hey soul-ai"` | Open AI chat |
 | `"settings"` | Open settings panel |
 | `"listen"` / `"microphone"` | Start environmental mic |
 | `"spin"` / `"rotate"` | Spin animation |
@@ -113,11 +113,11 @@ Tap the **VOICE** button or press **V** on keyboard, then speak a command:
 
 ### 4. Environmental Mic
 - Tap **ENV MIC** to start listening to the room
-- Souler will automatically detect music and switch to Music/Dance mode
+- Soul-AI will automatically detect music and switch to Music/Dance mode
 - When the music stops, it returns to Idle mode
 
 ### 5. AI Chat
-- Tap **CHAT** or say `"chat"` / `"hey souler"`
+- Tap **CHAT** or say `"chat"` / `"hey soul-ai"`
 - Type a message or tap the 🎤 button to speak
 - Set your API key in **Settings** first
 
@@ -137,7 +137,7 @@ Open with the gear icon ⚙️ or press **S**.
 | **Accent Theme** | Color scheme: Neon Cyan, Hot Pink, Purple, Green, Gold |
 | **Animation Speed** | Speed multiplier for all animations |
 | **Character Image** | Re-upload or change your character |
-| **AI System Prompt** | Customize Souler's personality |
+| **AI System Prompt** | Customize Soul-AI's personality |
 
 ---
 
@@ -189,7 +189,7 @@ Works great with:
 ## 🏗️ Project Structure
 
 ```
-souler-web/
+soul-ai/
 ├── index.html              # Main SPA — full UI layout
 ├── style.css               # Dark cyberpunk theme, animations, responsive
 ├── app.js                  # Core logic: audio, animation, voice, AI chat
@@ -213,7 +213,7 @@ souler-web/
 | **Web Audio API** | Beat detection, frequency analysis, energy normalization |
 | **Canvas 2D API** | Character rendering, animation, glow effects |
 | **Web Speech API** | Voice command recognition + TTS responses |
-| **SpeechSynthesis API** | Souler speaks back to you |
+| **SpeechSynthesis API** | Soul-AI speaks back to you |
 | **MediaDevices API** | Environmental microphone access |
 | **Tailwind CSS (CDN)** | Utility-first styling |
 | **Service Worker** | PWA offline caching |
@@ -224,7 +224,7 @@ souler-web/
 
 ## 🔌 AI Integration
 
-Souler supports any **OpenAI-compatible API**. In Settings, set:
+Soul-AI supports any **OpenAI-compatible API**. In Settings, set:
 
 | Service | API Base URL | Model |
 |---|---|---|
@@ -247,7 +247,7 @@ Souler supports any **OpenAI-compatible API**. In Settings, set:
 - [ ] **Playlist support** — queue multiple tracks
 - [ ] **Recording** — export character animation as video
 - [ ] **Live2D integration** — richer 2D puppet animation
-- [ ] **WebRTC** — live stream your Souler session
+- [ ] **WebRTC** — live stream your Soul-AI session
 - [ ] **Custom voice** — clone a voice using ElevenLabs or similar API
 - [ ] **3D mode** — Three.js character with depth and lighting
 - [ ] **Multilingual voice commands** — detect and switch language automatically
@@ -266,7 +266,7 @@ Souler supports any **OpenAI-compatible API**. In Settings, set:
 
 ## 📄 License
 
-MIT © 2025 Souler Web Contributors — see [LICENSE](LICENSE) for details.
+MIT © 2025 Soul-AI Contributors — see [LICENSE](LICENSE) for details.
 
 ---
 
